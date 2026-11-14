@@ -29,6 +29,7 @@ REDACTED_TEXT = "[REDACTED]"
 FIGURE_TEXT = "[Figure]"
 BULLET_STYLE = "List Paragraph"
 BODY_STYLE = "Normal"
+PLACEHOLDER_TITLE = "x"  # what the skeleton builder writes for free-text titles
 
 
 def now_iso() -> str:
@@ -182,6 +183,10 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
         "template": SOURCE_TEMPLATE, "extracted_at": now_iso(),
     }
     protocol["target"] = {"template": TARGET_TEMPLATE, "template_file": template_file}
+    for heading in outline:
+        section = find_section(protocol, heading.number)
+        if section is not None and section.get("title") == PLACEHOLDER_TITLE:
+            section["title"] = heading.title
     placer = Placer(assets_dir)
     for root in result.nodes:
         place_node(protocol, schema, placer, root, None)
