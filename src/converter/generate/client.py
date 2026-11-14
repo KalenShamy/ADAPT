@@ -3,8 +3,12 @@
 import json
 import os
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Protocol
 
+# Backend used when --llm is not given: "cli" (claude), "codex" or "api".
+DEFAULT_BACKEND = "cli"
 DEFAULT_MODEL = "sonnet"
 CLI_TIMEOUT_SECONDS = 300
 API_MAX_TOKENS = 4096
@@ -16,6 +20,7 @@ class LlmError(RuntimeError):
 
 
 class LlmClient(Protocol):
+    name: str
     model: str
 
     def complete(self, prompt: str) -> str: ...
@@ -23,6 +28,8 @@ class LlmClient(Protocol):
 
 class ClaudeCliClient:
     """Runs the local `claude` CLI in print mode with every tool disabled."""
+
+    name = "claude"
 
     def __init__(self, model: str = DEFAULT_MODEL, timeout: int = CLI_TIMEOUT_SECONDS) -> None:
         self.model = model
@@ -64,6 +71,8 @@ def parse_cli_output(stdout: str) -> str:
 class AnthropicApiClient:
     """Same interface as ClaudeCliClient, backed by the Anthropic SDK (optional dependency)."""
 
+    name = "claude"
+
     def __init__(self, model: str = API_DEFAULT_MODEL, max_tokens: int = API_MAX_TOKENS) -> None:
         try:
             import anthropic
@@ -84,9 +93,49 @@ class AnthropicApiClient:
         return "".join(block.text for block in message.content if block.type == "text")
 
 
+class CodexCliClient:
+    """Runs the local `codex exec` in a read-only sandbox and reads back the final message.
+
+    With no model given, codex uses the model from the user's own config.
+    """
+
+    name = "codex"
+
+    def __init__(self, model: str | None = None, timeout: int = CLI_TIMEOUT_SECONDS) -> None:
+        self.model = model or "codex-default"
+        self._model_flag = ["--model", model] if model else []
+        self.timeout = timeout
+
+    def complete(self, prompt: str) -> str:
+        with tempfile.TemporaryDirectory() as work_dir:
+            reply_path = Path(work_dir) / "reply.txt"
+            command = [
+                "codex", "exec", *self._model_flag,
+                "--sandbox", "read-only",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--cd", work_dir,
+                "--output-last-message", str(reply_path),
+                "-",
+            ]
+            try:
+                result = subprocess.run(
+                    command, input=prompt, capture_output=True, text=True, timeout=self.timeout,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError) as error:
+                raise LlmError(f"codex CLI failed: {error}") from error
+            if result.returncode != 0:
+                raise LlmError(f"codex CLI exited {result.returncode}: {result.stderr.strip()[:300]}")
+            if not reply_path.exists():
+                raise LlmError("codex CLI wrote no final message")
+            return reply_path.read_text()
+
+
 def make_client(backend: str, model: str | None = None) -> LlmClient:
     if backend == "cli":
         return ClaudeCliClient(model) if model else ClaudeCliClient()
     if backend == "api":
         return AnthropicApiClient(model) if model else AnthropicApiClient()
-    raise ValueError(f"unknown LLM backend: {backend!r} (use 'cli' or 'api')")
+    if backend == "codex":
+        return CodexCliClient(model)
+    raise ValueError(f"unknown LLM backend: {backend!r} (use 'cli', 'codex' or 'api')")

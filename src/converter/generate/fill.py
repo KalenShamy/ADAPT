@@ -6,10 +6,11 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 
 from converter.generate.client import LlmClient, LlmError
-from converter.generate.prompts import build_prompt, parse_response
+from converter.generate.guidance import section_guidance, style_example
+from converter.generate.prompts import MAX_DRAFT_WORDS, build_prompt, parse_response
 
 type JsonObject = dict[str, object]
-type SectionValidator = Callable[[JsonObject], list[str]]
+type DocumentValidator = Callable[[JsonObject], list[str]]
 
 MAX_ATTEMPTS = 2
 GENERATED_STATUSES = ("populated", "not_applicable", "missing")
@@ -84,7 +85,7 @@ def llm_custody(client: LlmClient, confidence: str) -> JsonObject:
     return {
         "origin": "ai_generated",
         "v10_sources": [],
-        "actor": {"kind": "llm", "name": "claude", "model": client.model},
+        "actor": {"kind": "llm", "name": client.name, "model": client.model},
         "confidence": confidence,
         "needs_review": True,
     }
@@ -102,6 +103,8 @@ def apply_draft(section: JsonObject, draft: JsonObject, client: LlmClient) -> No
     paragraphs = draft.get("paragraphs", [])
     if status == "populated" and not (isinstance(paragraphs, list) and paragraphs and all(isinstance(p, str) and p.strip() for p in paragraphs)):
         raise ValueError("populated draft has no paragraphs")
+    if status == "populated" and sum(len(text.split()) for text in paragraphs) > MAX_DRAFT_WORDS:
+        raise ValueError(f"draft is longer than {MAX_DRAFT_WORDS} words")
     custody = llm_custody(client, str(confidence))
     section["status"] = status
     section["custody"] = custody
@@ -112,7 +115,7 @@ def apply_draft(section: JsonObject, draft: JsonObject, client: LlmClient) -> No
 
 
 def generate_missing(
-    protocol: JsonObject, client: LlmClient, validate_section: SectionValidator | None = None,
+    protocol: JsonObject, client: LlmClient, validate: DocumentValidator | None = None,
     schema: JsonObject | None = None, has_v10_source: frozenset[str] = frozenset(),
 ) -> JsonObject:
     """Return a copy of `protocol` with missing sections drafted. Failures leave the section missing and are logged."""
@@ -121,9 +124,9 @@ def generate_missing(
     filled, no_basis, failed = [], [], []
     for section in missing_sections(result, schema, has_v10_source):
         number, title = str(section["number"] or section["title"]), str(section["title"])
-        guidance = [str(line) for line in section.get("x-guidance", [])]
-        prompt = build_prompt(number, title, guidance, context)
-        outcome = try_fill(section, prompt, client, validate_section)
+        guidance = section_guidance(number) or [str(line) for line in section.get("x-guidance", [])]
+        prompt = build_prompt(number, title, guidance, context, style_example(number))
+        outcome = try_fill(section, prompt, client, (lambda: validate(result)) if validate else None)
         {"filled": filled, "no_basis": no_basis, "failed": failed}[outcome].append(number)
     log = result.setdefault("processing_log", [])
     assert isinstance(log, list)
@@ -138,7 +141,7 @@ def generate_missing(
     return result
 
 
-def try_fill(section: JsonObject, prompt: str, client: LlmClient, validate_section: SectionValidator | None) -> str:
+def try_fill(section: JsonObject, prompt: str, client: LlmClient, validate: Callable[[], list[str]] | None) -> str:
     """'filled', 'no_basis' (model answered missing) or 'failed' (call, parse or validation error)."""
     for _ in range(MAX_ATTEMPTS):
         snapshot = copy.deepcopy(section)
@@ -149,7 +152,7 @@ def try_fill(section: JsonObject, prompt: str, client: LlmClient, validate_secti
             continue
         if section["status"] == "missing":
             return "no_basis"
-        if validate_section is None or not validate_section(section):
+        if validate is None or not validate():
             return "filled"
         restore(section, snapshot)
     return "failed"

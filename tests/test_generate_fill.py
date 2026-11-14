@@ -7,9 +7,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from converter.generate.client import LlmError, make_client, parse_cli_output
 from converter.generate.fill import generate_missing, missing_sections
+from converter.generate.guidance import section_guidance, style_example
+from converter.generate.prompts import MAX_DRAFT_WORDS, build_prompt
 
 
 class FakeClient:
+    name = "fake"
     model = "fake-model"
 
     def __init__(self, replies):
@@ -64,6 +67,28 @@ class FillTests(unittest.TestCase):
     def test_invalid_json_retries_then_leaves_missing(self):
         client = FakeClient(["not json", "still not json"])
         result = generate_missing(make_protocol(), client)
+        self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
+        self.assertIn("failed 1", result["processing_log"][-1]["summary"])
+
+    def test_m11_guidance_reaches_the_prompt(self):
+        reply = json.dumps({"status": "missing", "paragraphs": []})
+        client = FakeClient([reply])
+        generate_missing(make_protocol(), client)
+        self.assertIn("trial duration is appropriate", client.prompts[0])
+        self.assertIn("STYLE EXAMPLE", client.prompts[0])
+
+    def test_guidance_falls_back_to_cpt_key_instructions(self):
+        self.assertTrue(section_guidance("2.2.1") or section_guidance("4.2.2"))
+        self.assertEqual(section_guidance("99.9"), [])
+        self.assertIsNone(style_example("99.9"))
+
+    def test_prompt_without_example_has_no_example_block(self):
+        self.assertNotIn("STYLE EXAMPLE", build_prompt("4.2.4", "Duration", ["g"], "source"))
+
+    def test_overlong_draft_is_rejected(self):
+        long_text = " ".join(["word"] * (MAX_DRAFT_WORDS + 1))
+        reply = json.dumps({"status": "populated", "paragraphs": [long_text], "confidence": "high"})
+        result = generate_missing(make_protocol(), FakeClient([reply, reply]))
         self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
         self.assertIn("failed 1", result["processing_log"][-1]["summary"])
 
