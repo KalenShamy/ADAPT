@@ -7,7 +7,7 @@ import pymupdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from extract_to_usdm import numbered_bookmarks, same_heading_title, source_checks
+from converter.extract.pdf import numbered_bookmarks, same_heading_title, source_checks
 from pdf_to_cpt_docx import (
     REDACTED_HEADING_TITLE, Document, Figure, Heading, PageMark, Row, Span, find_tables, skipped_numbers, structure,
 )

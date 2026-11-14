@@ -168,11 +168,13 @@ def synopsis_title(document, values, notes):
                 pending = True
 
 
-def finish_title(values: dict[str, str], others: list[tuple[str | None, str]]) -> None:
+def finish_title(values: dict[str, str], others: list[tuple[str | None, str]], notes: list[str] | None = None) -> None:
     """Fold fallback fields into their slots and drop extras that repeat a mapped value."""
     primary = values.pop("primary_intervention", None)
     if primary and not values.get("compound"):
         values["compound"] = primary
+        if notes is not None:
+            notes.append("Investigational Product Code(s) taken from 'Primary study intervention(s)'")
     mapped_text = " ".join(values.values())
     others[:] = [(label, value) for label, value in others
                  if label or not (COVER_HEADING.match(value) or value in mapped_text)]

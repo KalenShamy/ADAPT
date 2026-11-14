@@ -5,8 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pdf_to_cpt_docx import Heading, Paragraph, Span, Table
-from special_sections import split_objectives
-from write_v011_docx import table_provenance
+from special_sections import split_objectives, table_provenance
 
 
 def cell(text, colspan=1, rowspan=1):

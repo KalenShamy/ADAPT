@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 from cross_references import replace_text
-from pdf_to_cpt_docx import Paragraph, Subheading, Table, split_label
+from pdf_to_cpt_docx import Heading, Paragraph, Subheading, Table, split_label
 
 DROPPED = "dropped"
 OBJECTIVES = "objectives"
@@ -231,3 +231,23 @@ def table_piece(table, header_rows, body_rows):
     rows = header_rows + body_rows
     height = table.height * len(rows) / len(table.grid)
     return Table(rows, list(table.col_widths), last_page, first_page, table.padding, height)
+
+
+def table_provenance(source_blocks, output_blocks):
+    sources = []
+    heading = "front"
+    for block in source_blocks:
+        if isinstance(block, Heading):
+            heading = block.number
+        if isinstance(block, Table):
+            sources.append((block, heading, {id(paragraph) for row in block.grid for cell in row if cell
+                                             for paragraph in cell["paragraphs"]}))
+    outputs = []
+    for block in output_blocks:
+        if not isinstance(block, Table):
+            continue
+        paragraphs = {id(paragraph) for row in block.grid for cell in row if cell for paragraph in cell["paragraphs"]}
+        outputs.append([index for index, (source, heading, source_paragraphs) in enumerate(sources)
+                        if source is block or paragraphs & source_paragraphs])
+    return {"sources": [{"page": source.first_page, "section": heading} for source, heading, paragraphs in sources],
+            "outputs": outputs}

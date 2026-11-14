@@ -8,8 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from docx.oxml.ns import qn
 
-from extract_to_usdm import finish_title
-from write_v011_docx import DEFAULT_TEMPLATE
+from converter.cli import DEFAULT_TEMPLATE
+from converter.title_page import finish_title
 from pdf_to_cpt_docx import (
     PageMark, Row, Span, Writer, canonical_label, collect_title_values, structure, title_fields, write_title_page,
 )

@@ -12,7 +12,7 @@ from section_splitters import (
     ACCOUNTABILITY_NODE, ASSIGNMENT_NODE, PREPARATION_NODE, RANDOMIZATION_NODE, STORAGE_NODE,
     handling_child_target, split_assignment, split_handling,
 )
-from write_v011_docx import DEFAULT_CROSSWALK, DEFAULT_TEMPLATE
+from converter.cli import DEFAULT_CROSSWALK, DEFAULT_TEMPLATE
 
 
 def paragraph(text, kind="body"):
