@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from block_xhtml import blocks_to_xhtml
-from pdf_to_cpt_docx import Figure, Paragraph, Redaction, Table
+from pdf_to_cpt_docx import Figure, Paragraph, Redaction, Span, Table
+from converter.title_page import TITLE_PAGE_UNMAPPED_ID, TitlePageFiller, collect
 from restructure import Subheading, front_parts, iter_nodes, restructure
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema"
@@ -66,6 +67,11 @@ class Placer:
         self.assets_dir = assets_dir
         self.next_index = 0
         self.layout: dict[str, str] = {}
+
+    def take_index(self) -> int:
+        index = self.next_index
+        self.next_index += 1
+        return index
 
     def block(self, block: object, section_source: JsonObject) -> JsonObject:
         index = self.next_index
@@ -192,6 +198,18 @@ def unplaced_front(placer: Placer, front: list) -> list[JsonObject]:
     return items
 
 
+def unplaced_title_fields(placer: Placer, others: list[tuple[str | None, str]]) -> list[JsonObject]:
+    """Title page fields with no v011 slot, kept as one item each."""
+    items = []
+    for label, text in others:
+        source = {"section_id": TITLE_PAGE_UNMAPPED_ID, "found_number": None, "found_heading": label,
+                  "match": "protocol_added"}
+        block = placer.block(Paragraph([Span(text, False, False, False, 0)]), source)
+        full_source = {**source, "portion": "all", "source_indices": [block["source_index"]]}
+        items.append({"v10_source": full_source, "reason": "no_v11_slot", "blocks": [block]})
+    return items
+
+
 def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outline, assets_dir: Path, template_file: str):
     """Return (protocol JSON, layout sidecar dict, restructure report)."""
     result = restructure(document, crosswalk, outline)
@@ -208,7 +226,11 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     placer = Placer(assets_dir)
     for root in result.nodes:
         place_node(protocol, schema, placer, root, None)
-    protocol["unplaced_v10_content"] = unplaced_front(placer, result.front + result.amendment_details)
+    values, other_fields = collect(document, pdf_path)
+    TitlePageFiller(protocol, schema, placer.take_index, SCRIPT_ACTOR).fill(values)
+    protocol["unplaced_v10_content"] = (
+        unplaced_front(placer, result.front + result.amendment_details) + unplaced_title_fields(placer, other_fields)
+    )
     protocol["processing_log"] = [{
         "step": "place", "actor": copy.deepcopy(SCRIPT_ACTOR), "at": now_iso(),
         "summary": f"placed {placer.next_index} blocks from {pdf_path.name}",

@@ -7,7 +7,8 @@ from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import RGBColor
 
 from block_xhtml import xhtml_to_blocks
-from pdf_to_cpt_docx import Writer, write_block
+from converter.title_page import TITLE_PAGE_UNMAPPED_ID, render_values
+from pdf_to_cpt_docx import Writer, write_block, write_title_page
 
 type JsonObject = dict[str, object]
 
@@ -26,9 +27,11 @@ class DocxRenderer:
         self.assets_dir = assets_dir
         self.protocol_label = protocol_label
         self.toc_entries: list[tuple[int, str, str]] = []
+        self.protocol_number = ""
 
     def render(self, protocol: JsonObject, out_path: Path) -> None:
         writer = self.writer
+        self.title_page(protocol)
         self.unplaced_front(protocol)
         writer.toc()
         writer.page_break()
@@ -37,12 +40,21 @@ class DocxRenderer:
             self.section(sections[key], level=1)
         writer.finish_sections()
         writer.fill_toc(self.toc_entries)
-        writer.footers(self.protocol_label)
+        writer.footers(self.protocol_label or self.protocol_number)
         writer.save(str(out_path))
+
+    def title_page(self, protocol: JsonObject) -> None:
+        others = [
+            (item["v10_source"]["found_heading"], item["blocks"][0]["text"])
+            for item in protocol.get("unplaced_v10_content", []) if is_title_field(item)
+        ]
+        values = render_values(protocol["title_page"])
+        self.protocol_number = write_title_page(self.writer, values, others, []) or ""
+        self.writer.page_break()
 
     def unplaced_front(self, protocol: JsonObject) -> None:
         """Front matter has no v011 slot yet; keep it ahead of the TOC as the old converter did."""
-        items = protocol.get("unplaced_v10_content", [])
+        items = [item for item in protocol.get("unplaced_v10_content", []) if not is_title_field(item)]
         for item in items:
             for block in item["blocks"]:
                 self.block(block)
@@ -114,6 +126,10 @@ class DocxRenderer:
         paragraph = self.writer.doc.paragraphs[-1] if block["type"] != "table" else None
         for run in paragraph.runs if paragraph is not None else []:
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+
+def is_title_field(item: JsonObject) -> bool:
+    return item["v10_source"]["section_id"] == TITLE_PAGE_UNMAPPED_ID
 
 
 def is_ai(block: JsonObject) -> bool:
