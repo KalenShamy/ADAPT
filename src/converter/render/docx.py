@@ -8,7 +8,7 @@ from docx.shared import RGBColor
 
 from block_xhtml import xhtml_to_blocks
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, render_values
-from pdf_to_cpt_docx import Writer, write_block, write_title_page
+from pdf_to_cpt_docx import Figure, PageMark, Table, Writer, write_block, write_title_page
 
 type JsonObject = dict[str, object]
 
@@ -90,11 +90,14 @@ class DocxRenderer:
         if status == "omitted":
             return
         number = section.get("number") or ""
+        content = section.get("content", [])
+        landscape = self.landscape_blocks(content)
+        self.writer.set_orientation(bool(content) and landscape[id(content[0])])
         self.heading(str(number), str(section["title"]), level)
-        content = self.fixed_text(number, section.get("content", []))
+        content = self.fixed_text(number, content)
         self.status_text(status, content)
         for block in content:
-            self.block(block)
+            self.block(block, landscape[id(block)])
         children = section.get("subsections", {})
         for key in sorted(children, key=natural_key):
             self.section(children[key], level + 1)
@@ -116,8 +119,9 @@ class DocxRenderer:
 
     def additional(self, node: JsonObject, level: int) -> None:
         self.heading("", str(node["title"]), level)
+        landscape = self.landscape_blocks(node["content"])
         for block in node["content"]:
-            self.block(block)
+            self.block(block, landscape[id(block)])
         for child in node["subsections"]:
             self.additional(child, level + 1)
 
@@ -143,16 +147,37 @@ class DocxRenderer:
         for run in paragraph.runs:
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
-    def block(self, block: JsonObject) -> None:
+    def block(self, block: JsonObject, landscape: bool = False) -> None:
         if is_ai(block):
             self.ai_block(block)
             return
-        xhtml = self.layout.get(str(block.get("source_index")))
-        if xhtml is not None:
-            for rich in xhtml_to_blocks(xhtml, self.assets_dir):
-                write_block(self.writer, rich)
-        else:
+        rich_blocks = self.rich_blocks(block)
+        if rich_blocks is None:
             self.plain_block(block)
+            return
+        self.writer.set_orientation(landscape)
+        for rich in rich_blocks:
+            write_block(self.writer, rich)
+
+    def rich_blocks(self, block: JsonObject) -> list | None:
+        xhtml = self.layout.get(str(block.get("source_index")))
+        return None if xhtml is None else xhtml_to_blocks(xhtml, self.assets_dir)
+
+    def landscape_blocks(self, content: list[JsonObject]) -> dict[int, bool]:
+        """Which blocks go on landscape pages, keyed by id(block).
+
+        A table or figure that sat on a landscape source page does, and so does the caption or heading
+        right before it (a chain of marked blocks ending in one). Text after a table (footnotes) goes back to portrait.
+        """
+        rich = [None if is_ai(block) else self.rich_blocks(block) for block in content]
+        marked = [blocks is not None and is_landscape(blocks) for blocks in rich]
+        visual = [blocks is not None and any(isinstance(item, (Table, Figure)) for item in blocks) for blocks in rich]
+        flags = {}
+        leads_to_visual = False
+        for index in reversed(range(len(content))):
+            leads_to_visual = marked[index] and (visual[index] or leads_to_visual)
+            flags[id(content[index])] = leads_to_visual
+        return flags
 
     def plain_block(self, block: JsonObject) -> None:
         if block["type"] == "table":
@@ -167,6 +192,10 @@ class DocxRenderer:
         paragraph = self.writer.doc.paragraphs[-1] if block["type"] != "table" else None
         for run in paragraph.runs if paragraph is not None else []:
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+
+def is_landscape(rich_blocks: list) -> bool:
+    return any(isinstance(block, PageMark) and block.landscape for block in rich_blocks)
 
 
 def has_text(content: list[JsonObject]) -> bool:

@@ -51,7 +51,8 @@ REDACTION_BAR_STROKE_SLACK = 1.0  # pt; a bar's outline sticks out past its rect
 CELL_FILL_MIN_SHARE = 0.5  # a fill must cover this share of a cell to count as its shading
 DEFAULT_TABLE_FONT_SIZE = 10.0  # pt, for a table with no measurable text
 TWIPS_PER_PT = 20
-TABLE_PAGE_HEIGHT_SHARE = 0.9  # a one-page table may fill this much of the text height, leaving room for its caption
+CELL_BULLET_INDENT_PT = 8.0  # the template bullet indent would leave narrow table columns no room for text
+TABLE_PAGE_HEIGHT_SHARE = 0.84  # a one-page table may fill this much of the text height; the rest holds its caption and rows that wrap taller than the source
 FIGURE_DPI = 150
 SCANNED_PAGE_VERTICAL_ALLOWANCE = 18.0  # pt for the image paragraph's spacing and baseline
 TOC_DEPTH = 3
@@ -77,7 +78,7 @@ HEADING_X_TOLERANCE = 30.0  # pt a heading may sit right of the first heading's 
 APPENDIX_HEADING = re.compile(r"^Appendix\s+([A-Z])\b[\s:.]+\S")
 LETTERED_SUBSECTION = re.compile(r"^([A-Z])\s?(\d{1,2}(?:\.\d{1,2}){0,3})$")
 BULLET_GLYPHS = {"•", "", "", "", "", "o", "▪", "■", "–", "-", "○", "◦", "§", "", "•", "", "✓"}
-CAPTION = re.compile(r"^(Table|Figure)\s+[\dA-Z][\w.\-]*\s+\S")
+CAPTION = re.compile(r"^(Table|Figure)\s+[\dA-Z][\w.\-]*:?\s+\S")
 
 FRONT_MATTER_HEADINGS = re.compile(
     r"^(document history|protocol amendment summary of changes( table)?|summary of changes|"
@@ -1106,8 +1107,9 @@ class Writer:
         if landscape == self.landscape or self.landscape_sect is None:
             return
         ending = copy.deepcopy(self.landscape_sect if self.landscape else self.portrait_sect)
-        for ref in ending.findall(qn("w:titlePg")):
-            ending.remove(ref)
+        for tag in ("w:titlePg", "w:pgNumType"):  # the template's first section restarts numbering at 1
+            for ref in ending.findall(qn(tag)):
+                ending.remove(ref)
         p = self.paragraph(self.styles["body"])
         p._p.get_or_add_pPr().append(ending)
         self.landscape = landscape
@@ -1149,7 +1151,7 @@ class Writer:
 
     def subheading(self, subheading):
         style = self.styles["front_heading"] if subheading.kind == "bold" else self.styles["field_label"]
-        self.paragraph(style, text=subheading.title)
+        self.paragraph(style, text=subheading.title).paragraph_format.keep_with_next = True
 
     def body_paragraph(self, para):
         if para.kind == "bullet":
@@ -1165,7 +1167,9 @@ class Writer:
                 p._p.get_or_add_pPr().insert(1, num_pr)
             return p
         if para.kind == "caption":
-            return self.paragraph(self.styles["caption"], para.spans)
+            caption = self.paragraph(self.styles["caption"], para.spans)
+            caption.paragraph_format.keep_with_next = True
+            return caption
         return self.paragraph(self.styles["body"], para.spans)
 
     def table(self, table):
@@ -1217,6 +1221,9 @@ class Writer:
                     target.paragraphs[0].style = self.doc.styles[self.styles["table_text"]]
                 for p in target.paragraphs:
                     compact_cell_paragraph(p, font_size, keep_with_next)
+                    if p.style.name == self.styles["bullet"]:
+                        p.paragraph_format.left_indent = Pt(CELL_BULLET_INDENT_PT)
+                        p.paragraph_format.first_line_indent = Pt(-CELL_BULLET_INDENT_PT)
         for row in t.rows:
             row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
         t.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
@@ -1263,6 +1270,8 @@ class Writer:
             paragraphs.append(p)
             if number:
                 p.add_run(f"{number}\t{title}")
+            elif title:
+                p.add_run(title)
         first, last = paragraphs[0], paragraphs[-1]
         start = first._p.makeelement(qn("w:r"), {})
         start.append(field_char("begin"))

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from block_xhtml import blocks_to_xhtml
-from pdf_to_cpt_docx import Figure, Paragraph, Redaction, Span, Table
+from pdf_to_cpt_docx import Figure, PageMark, Paragraph, Redaction, Span, Table
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, TitlePageFiller, collect
 from restructure import Subheading, front_parts, iter_nodes, restructure
 
@@ -72,8 +72,9 @@ def custody(origin: str, sources: list[JsonObject]) -> JsonObject:
 
 
 class Placer:
-    def __init__(self, assets_dir: Path) -> None:
+    def __init__(self, assets_dir: Path, landscape_pages: dict[int, bool]) -> None:
         self.assets_dir = assets_dir
+        self.landscape_pages = landscape_pages
         self.next_index = 0
         self.layout: dict[str, str] = {}
 
@@ -82,10 +83,15 @@ class Placer:
         self.next_index += 1
         return index
 
+    def landscape_marks(self, block: object) -> list[PageMark]:
+        """A landscape page mark ahead of a block that sat on a landscape page in the source."""
+        page = block.first_page if isinstance(block, Table) else getattr(block, "page", 0)
+        return [PageMark(True, page)] if self.landscape_pages.get(page) else []
+
     def block(self, block: object, section_source: JsonObject) -> JsonObject:
         index = self.next_index
         self.next_index += 1
-        self.layout[str(index)] = blocks_to_xhtml([block], self.assets_dir)
+        self.layout[str(index)] = blocks_to_xhtml([*self.landscape_marks(block), block], self.assets_dir)
         source = {**section_source, "source_indices": [index], "portion": "all"}
         base = {"source_index": index, "custody": custody("v10_derived", [source])}
         if isinstance(block, Table):
@@ -236,7 +242,7 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
             section["title"] = M11_HEADINGS[heading.number]
         elif section.get("title") == PLACEHOLDER_TITLE:
             section["title"] = heading.title
-    placer = Placer(assets_dir)
+    placer = Placer(assets_dir, result.landscape_pages)
     for root in result.nodes:
         place_node(protocol, schema, placer, root, None)
     values, other_fields = collect(document, pdf_path)
