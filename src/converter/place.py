@@ -30,6 +30,15 @@ REDACTED_TEXT = "[REDACTED]"
 FIGURE_TEXT = "[Figure]"
 BULLET_STYLE = "List Paragraph"
 BODY_STYLE = "Normal"
+# Headings where the CPT v011 template departs from the M11 template's wording (British spelling, serial comma)
+M11_HEADINGS = {
+    "6.7": "Investigational Trial Intervention Assignment, Randomisation and Blinding",
+    "6.7.2": "Randomisation",
+    "8.4.6": "Suicidal Ideation and Behaviour Risk Monitoring",
+    "8.6.1": "Genetics, Genomics, Pharmacogenetics, and Pharmacogenomics",
+    "8.8": "Medical Resource Utilisation and Health Economics",
+    "10.5": "Analyses Associated with the Secondary Objective(s)",
+}
 PLACEHOLDER_TITLE = "x"  # what the skeleton builder writes for free-text titles
 
 
@@ -221,7 +230,11 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     protocol["target"] = {"template": TARGET_TEMPLATE, "template_file": template_file}
     for heading in outline:
         section = find_section(protocol, heading.number)
-        if section is not None and section.get("title") == PLACEHOLDER_TITLE:
+        if section is None:
+            continue
+        if heading.number in M11_HEADINGS:
+            section["title"] = M11_HEADINGS[heading.number]
+        elif section.get("title") == PLACEHOLDER_TITLE:
             section["title"] = heading.title
     placer = Placer(assets_dir)
     for root in result.nodes:

@@ -1198,8 +1198,11 @@ class Writer:
                 if cell is None:
                     continue
                 target = t.cell(r, c)
-                if cell["rowspan"] > 1 or cell["colspan"] > 1:
-                    target = target.merge(t.cell(r + cell["rowspan"] - 1, c + cell["colspan"] - 1))
+                # A full-width cell that also spans rows leaves continuation rows with one full-width
+                # vMerge cell, which the M11 validator's docx reader turns into a zero-cell row and crashes on
+                rowspan = 1 if cell["colspan"] >= n_cols else cell["rowspan"]
+                if rowspan > 1 or cell["colspan"] > 1:
+                    target = target.merge(t.cell(r + rowspan - 1, c + cell["colspan"] - 1))
                 if cell["fill"]:
                     shade_cell(target, cell["fill"])
                 first = True
@@ -1542,27 +1545,67 @@ def registry_rows(text):
     return [(match.group(1).upper(), match.group(2)) for match in REGISTRY_LABEL.finditer(text)]
 
 
+M11_IDENTIFIER_NAMES = {
+    "IND": "FDA IND Number", "NCT": "NCT Number", "WHO": "WHO-UTN Number",
+    "EU CT": "EU CT Number", "EU TRIAL NUMBER": "EU CT Number", "CTIS": "EU CT Number",
+}
+OTHER_IDENTIFIER_NAME = "Other Regulatory or Clinical Trial Identifier"
+AMENDMENT_STATEMENTS = {
+    "none": "This protocol has not been amended.",
+    "first": "This is the first protocol amendment.",
+    "later": "This protocol has been amended previously. Details of prior amendments are presented in Section 12.3 Prior Protocol Amendment(s).",
+}
+# Title-page fields M11 requires after the slot fields the template order covers
+AFTER_PROTOCOL_NUMBER = ("Original Protocol:", "original_protocol")
+AFTER_AMENDMENT_IDENTIFIER = ("Amendment Scope:", "amendment_scope")
+
+
+def amendment_state(values):
+    """'none', 'first' or 'later' from the amendment number the source gives."""
+    digits = re.search(r"\d+", values.get("amendment_number", ""))
+    if not digits:
+        return "none"
+    return "first" if int(digits.group()) == 1 else "later"
+
+
 def write_title_page(writer, values, others, notes):
     """Write the v011 title page: the template's fields in its order, then fields it has no slot for."""
     styles = writer.styles
     labels = CPT_TITLE_LABELS["v011"]
+    state = amendment_state(values)
+    derived = {
+        "original_protocol": "Yes" if state == "none" else "No",
+        # Global vs Not Global (a code list) can't be read from a v010 title page
+        "amendment_scope": "",
+    }
+    extra_after = {"protocol_number": AFTER_PROTOCOL_NUMBER, "amendment_number": AFTER_AMENDMENT_IDENTIFIER}
+
+    def field(label, text):
+        writer.paragraph(styles["field_label"], text=label)
+        if text:
+            writer.paragraph(styles["body"], text=text)
+
     writer.paragraph(styles["page_title"], text="Title Page")
     for key in V011_TITLE_ORDER:
         value = values.get(key)
         if not value:
             notes.append(f"title page: {labels[key]} not found in source")
-        writer.paragraph(styles["field_label"], text=labels[key])
-        writer.paragraph(styles["body"], text=value or MISSING_FIELD_VALUE)
-    writer.paragraph(styles["field_label"], text=labels["regulatory_ids"])
-    ids_text = values.get("regulatory_ids", "")
-    rows = registry_rows(ids_text) or ([("", ids_text)] if ids_text else [("", MISSING_FIELD_VALUE)])
-    if not ids_text:
+        # a code-list field can't hold the placeholder
+        field(labels[key], value or ("" if key == "phase" else MISSING_FIELD_VALUE))
+        if key in extra_after:
+            label, derived_key = extra_after[key]
+            field(label, derived[derived_key])
+    field(labels["regulatory_ids"], "")
+    rows = [(M11_IDENTIFIER_NAMES.get(label, OTHER_IDENTIFIER_NAME), identifier)
+            for label, identifier in registry_rows(values.get("regulatory_ids", ""))]
+    if not rows:
         notes.append("title page: regulatory identifiers not found in source")
+        rows = [("", MISSING_FIELD_VALUE)]
     writer.simple_table([("Label", "ID")] + rows)
-    writer.paragraph(styles["field_label"], text=labels["signatory"])
-    writer.paragraph(styles["body"], text=values.get("signatory") or MISSING_FIELD_VALUE)
-    writer.paragraph(styles["field_label"], text=labels["medical_monitor"])
-    writer.paragraph(styles["body"], text=values.get("medical_monitor") or MISSING_FIELD_VALUE)
+    field(labels["signatory"], values.get("signatory") or MISSING_FIELD_VALUE)
+    field(labels["medical_monitor"], values.get("medical_monitor") or MISSING_FIELD_VALUE)
+    field("Sponsor Approval:", values.get("date") or MISSING_FIELD_VALUE)
+    field("Amendment Details", AMENDMENT_STATEMENTS[state])
     for label, value in others:
         if label:
             writer.paragraph(styles["field_label"], text=label)

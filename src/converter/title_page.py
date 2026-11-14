@@ -3,6 +3,7 @@
 import copy
 import re
 from datetime import datetime
+from pathlib import Path
 
 import pymupdf
 
@@ -16,6 +17,7 @@ type JsonObject = dict[str, object]
 TITLE_STOP = re.compile(r"^(Confidential:|Confidential$|Any and all information|This protocol was approved|Based on TMF|©)", re.IGNORECASE)
 RUNNING_HEADER_VERSION = re.compile(r"^Version number:\s*(\S+)$", re.IGNORECASE)
 TITLE_EMPTY_LABELS = re.compile(r"^(Clinical Scientist|Medical\s*/?Study Director|Medical/Study Director|Study Medical Director/Medical Monitor|Monitoring team|Other:|Pediatric investigational plan|Sponsor Signatory \().*", re.IGNORECASE)
+PDF_SUFFIX = ".pdf"
 MAX_ACRONYM_CHARS = 14
 MAX_SHORT_TITLE_CHARS = 300
 TITLE_PAGE_UNMAPPED_ID = "v10:title_page.unmapped"
@@ -50,10 +52,26 @@ def phase_decode(text: str) -> str | None:
     return "/".join(f"Phase {number}" for number in numbers) if numbers else None
 
 
-def enrich_title(path, values, others, notes):
+def first_two_pages(path: Path) -> tuple[list[str], list[str]]:
+    """Non-empty page-1 lines and page-2 lines of a PDF."""
     with pymupdf.open(path) as pdf:
         lines = [line.strip() for line in pdf[0].get_text().splitlines() if line.strip()]
         second_page_lines = [line.strip() for line in pdf[1].get_text().splitlines()] if len(pdf) > 1 else []
+    return lines, second_page_lines
+
+
+def add_amendment_from_version(values: dict[str, str]) -> None:
+    amendment = re.search(r"\bAmendment\s+\d+(?:\s+EU-\d+)?", values.get("version", ""), re.IGNORECASE)
+    if amendment and not values.get("amendment_number"):
+        values["amendment_number"] = amendment.group()
+
+
+def enrich_title(path, values, others, notes):
+    """Supplement title fields from PDF page text. Other inputs have no page layout, so only the title table is used."""
+    if Path(path).suffix.lower() != PDF_SUFFIX:
+        add_amendment_from_version(values)
+        return
+    lines, second_page_lines = first_two_pages(path)
     running_version = next((match.group(1) for match in map(RUNNING_HEADER_VERSION.match, second_page_lines) if match), None)
     if running_version:
         values.setdefault("version", running_version)
@@ -126,9 +144,7 @@ def enrich_title(path, values, others, notes):
             if title_lines and all(line.upper() == line for line in title_lines):
                 values["title"] = " ".join(title_lines)
                 notes.append("Full Title recovered from the uppercase title between Clinical Study Protocol and Compound")
-    amendment = re.search(r"\bAmendment\s+\d+(?:\s+EU-\d+)?", values.get("version", ""), re.IGNORECASE)
-    if amendment and not values.get("amendment_number"):
-        values["amendment_number"] = amendment.group()
+    add_amendment_from_version(values)
     notes.append("Title fields supplemented from explicit first-page labels; unrecognized title fields retained verbatim")
 
 
@@ -297,10 +313,10 @@ def render_values(title_page: JsonObject) -> dict[str, str]:
     return values
 
 
-def collect(document, pdf_path) -> tuple[dict[str, str], list[tuple[str | None, str]]]:
+def collect(document, source_path) -> tuple[dict[str, str], list[tuple[str | None, str]]]:
     notes: list[str] = []
     values, others = collect_title_values(document, notes)
     synopsis_title(document, values, notes)
-    enrich_title(pdf_path, values, others, notes)
+    enrich_title(source_path, values, others, notes)
     finish_title(values, others)
     return values, others

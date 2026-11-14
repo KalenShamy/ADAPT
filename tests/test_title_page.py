@@ -11,7 +11,7 @@ from docx.oxml.ns import qn
 from converter.cli import DEFAULT_TEMPLATE
 from converter.title_page import finish_title
 from pdf_to_cpt_docx import (
-    PageMark, Row, Span, Writer, canonical_label, collect_title_values, structure, title_fields, write_title_page,
+    PageMark, Row, Span, Table, Writer, canonical_label, collect_title_values, structure, title_fields, write_title_page,
 )
 
 BODY_SIZE = 12.0
@@ -181,6 +181,46 @@ class WrittenTitlePageTests(unittest.TestCase):
         self.assertEqual(next_text, "Sponsor Signatory:")
         label_text = "".join(node.text or "" for node in body[table_index - 1].iter(qn("w:t")))
         self.assertEqual(label_text, "Regulatory or Clinical Trial Identifier(s):")
+
+
+class M11TitlePageTests(unittest.TestCase):
+    def written_texts(self, values):
+        writer = Writer(str(DEFAULT_TEMPLATE), "v011")
+        write_title_page(writer, values, [], [])
+        return ["".join(node.text or "" for node in element.iter(qn("w:t"))) for element in writer.body]
+
+    def test_identifier_table_uses_m11_names(self):
+        texts = self.written_texts({"regulatory_ids": "EU CT: 2025-524392-23-00; IND: 105379"})
+        table_text = texts[texts.index("Regulatory or Clinical Trial Identifier(s):") + 1]
+        self.assertIn("EU CT Number", table_text)
+        self.assertIn("FDA IND Number", table_text)
+
+    def test_original_protocol_without_an_amendment_number(self):
+        texts = self.written_texts({"protocol_number": "A1"})
+        self.assertEqual(texts[texts.index("Original Protocol:") + 1], "Yes")
+        self.assertEqual(texts[texts.index("Amendment Details") + 1], "This protocol has not been amended.")
+
+    def test_first_and_later_amendments(self):
+        first = self.written_texts({"amendment_number": "01"})
+        self.assertEqual(first[first.index("Original Protocol:") + 1], "No")
+        self.assertEqual(first[first.index("Amendment Details") + 1], "This is the first protocol amendment.")
+        later = self.written_texts({"amendment_number": "Amendment 3"})
+        self.assertTrue(later[later.index("Amendment Details") + 1].startswith("This protocol has been amended previously."))
+
+    def test_missing_phase_is_left_blank_not_a_placeholder(self):
+        texts = self.written_texts({})
+        self.assertEqual(texts[texts.index("Trial Phase:") + 1], "Sponsor Name and Address:")
+
+
+class FullWidthMergeTests(unittest.TestCase):
+    def test_full_width_cell_is_not_merged_down_into_continuation_rows(self):
+        paragraph = SimpleNamespace(spans=[Span("Wide", False, False, False, 10)], kind="body")
+        wide = {"rowspan": 3, "colspan": 2, "paragraphs": [paragraph], "fill": None}
+        grid = [[wide, None], [None, None], [None, None]]
+        writer = Writer(str(DEFAULT_TEMPLATE), "v011")
+        writer.table(Table(grid, [100.0, 100.0], 1, 1, (3, 2), 100.0))
+        table = next(element for element in writer.body if element.tag == qn("w:tbl"))
+        self.assertEqual(table.xpath(".//w:vMerge"), [])
 
 
 if __name__ == "__main__":

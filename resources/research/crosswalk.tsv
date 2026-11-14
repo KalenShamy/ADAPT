@@ -81,11 +81,11 @@ v010_number	v010_title	v011_number	also
 8.10	Health Economics OR Medical Resource Utilization and Health Economics	8.8	
 9	Statistical Considerations	10.1	
 9.1	General Considerations	10.1	
-9.1.1	Decision Criteria/Statistical Hypotheses	10.1	
+9.1.1	Decision Criteria/Statistical Hypotheses ~ Statistical Hypotheses	10.1	
 9.1.2	Multiplicity Adjustment	10.10	
 9.1.3	Impact of Intercurrent Events Strategies	10.1	
 9.1.4	Handling of Missing Data	10.4.1.3	10.5.1.3
-9.2	Analysis Sets	10.2	
+9.2	Analysis Sets ~ Populations for Analyses	10.2	
 9.3	Analyses Supporting Primary Objective(s)	10.4	
 9.3.1	Primary Endpoint(s)/Estimand(s)	10.4.1	
 9.3.1.1	Definition of endpoint(s)	10.4.1.1	
