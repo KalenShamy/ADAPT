@@ -38,9 +38,51 @@ LABEL_PARAGRAPHS = {
         "Number of Participants:", "Duration:",
         "Total planned duration of trial intervention for each participant:",
         "Total planned duration of trial participation for each participant:",
-        "Committees:", "Independent Committees:",
+        "Committees:", "Independent Committees:", "Other Committees:",
     ],
 }
+# 1.1.2 label -> the slots whose filled values are written after it
+LABEL_SLOTS = {
+    "Intervention Model:": ["intervention_model"],
+    "Control Type:": ["control_type"],
+    "Control Description:": ["control_description"],
+    "Intervention Assignment Method:": ["intervention_assignment_method", "randomisation_type", "other_assignment_method"],
+    "Stratification:": ["stratification"],
+    "Population Type:": ["population_type"],
+    "Minimum:": ["population_age.minimum", "population_age.minimum_unit"],
+    "Maximum:": ["population_age.maximum", "population_age.maximum_unit"],
+    "Site Distribution and Geographic Scope:": ["site_distribution", "site_geographic_scope"],
+    "Master Protocol:": ["master_protocol"],
+    "Drug/Device Combination Product Indicator:": ["drug_device_combination_product"],
+    "Adaptive Trial Design:": ["adaptive_trial_design"],
+    "Number of Arms:": ["number_of_arms"],
+    "Trial Blind Schema:": ["trial_blind_schema"],
+    "Blinded Roles: The following roles indicated will not be made aware of the treatment group assignment during the trial:": ["blinded_roles"],
+    "Independent Committees:": ["independent_committees"],
+    "Other Committees:": ["other_committees"],
+    "Number of Participants:": ["participant_number_qualifier", "number_of_participants", "participant_number_basis"],
+    "Total planned duration of trial intervention for each participant:": ["intervention_duration", "intervention_duration_description"],
+    "Total planned duration of trial participation for each participant:": ["participation_duration", "participation_duration_description"],
+}
+FIELD_TABLES = [
+    ("6", "interventions", [
+        ("Arm Name", "arm_name"), ("Arm Type", "arm_type"), ("Intervention Name", "intervention_name"),
+        ("Intervention Type", "intervention_type"), ("Pharmaceutical Dose Form", "dose_form"),
+        ("Dosage Strength(s)", "dosage_strengths"), ("Dosage Level(s)", "dosage_levels"),
+        ("Route of Administration", "route"), ("Regimen/Treatment Period", "regimen"), ("Use", "use"),
+        ("IMP/NIMP", "imp_or_nimp"), ("Sourcing", "sourcing")]),
+    ("9.2", "safety_event_reporting", [
+        ("Event Type", "event_type"), ("Other Event Type", "other_event_type"), ("Situational Scope", "situational_scope"),
+        ("Reportable Period Start", "reportable_period_start"), ("Reportable Period End", "reportable_period_end"),
+        ("Timing for Reporting to Sponsor", "timing_for_reporting"), ("Method for Reporting", "reporting_method"),
+        ("Back-up Method for Reporting", "backup_reporting_method")]),
+    ("12.3", "prior_amendments", [
+        ("Amendment Identifier", "amendment_identifier"), ("Sponsor Approval Date", "sponsor_approval_date"),
+        ("Approximate Enrollment", "approximate_enrollment"), ("Enrollment Scope", "enrollment_scope")]),
+]
+ESTIMAND_COLUMNS = ["population", "treatment", "endpoint", "population_level_summary"]
+ESTIMAND_HEADINGS = ["Population", "Treatment", "Endpoint", "Population-Level Summary"]
+OPTIONAL_LABELS = {"Other Committees:"}  # M11 Optional: written only when the source states them
 OVERALL_DESIGN_INTRO = "Key aspects of the trial design are summarised below."
 
 
@@ -94,17 +136,21 @@ class DocxRenderer:
         landscape = self.landscape_blocks(content)
         self.writer.set_orientation(bool(content) and landscape[id(content[0])])
         self.heading(str(number), str(section["title"]), level)
-        content = self.fixed_text(number, content)
+        content = self.fixed_text(number, content, section.get("fields", {}))
         self.status_text(status, content)
         for block in content:
             self.block(block, landscape[id(block)])
+        for criterion in section.get("fields", {}).get("criteria", []):
+            self.criterion(criterion)
+        self.field_tables(number, section.get("fields", {}))
+        self.objectives(section.get("objectives", []))
         children = section.get("subsections", {})
         for key in sorted(children, key=natural_key):
             self.section(children[key], level + 1)
         for extra in section.get("additional_subsections", []):
             self.additional(extra, level + 1)
 
-    def fixed_text(self, number: str, content: list[JsonObject]) -> list[JsonObject]:
+    def fixed_text(self, number: str, content: list[JsonObject], fields: JsonObject) -> list[JsonObject]:
         """Write the M11 text fixed for this section; return the source blocks still to write."""
         body = self.writer.styles["body"]
         if number in LEAD_INS:
@@ -113,9 +159,57 @@ class DocxRenderer:
         if number == "1.1.2":
             self.writer.paragraph(body, text=OVERALL_DESIGN_INTRO)
         for label in LABEL_PARAGRAPHS.get(number, []):
+            filled = filled_text(fields, LABEL_SLOTS.get(label, []))
+            if label in OPTIONAL_LABELS and not filled:
+                continue
             self.writer.paragraph(self.writer.styles["field_label"], text=label)
-            self.writer.paragraph(body, text=UNSPLIT_TEXT)
+            if filled:
+                self.highlighted(filled)
+            else:
+                self.writer.paragraph(body, text=UNSPLIT_TEXT)
         return content
+
+    def field_tables(self, number: str, fields: JsonObject) -> None:
+        """Tables M11 builds from record fields: interventions (6), safety event reporting (9.2), amendments (12.3)."""
+        for table_number, key, columns in FIELD_TABLES:
+            rows = [[cell_text(record[name]) for _, name in columns] for record in fields.get(key, [])]
+            rows = [row for row in rows if any(row)]
+            if table_number == number and rows:
+                self.highlighted(AI_NOTE)
+                self.writer.simple_table([[heading for heading, _ in columns], *rows])
+        for region in fields.get("country_regions", []):
+            identifier = region["identifier"]["value"]
+            self.writer.paragraph(self.writer.styles["field_label"], text=f"{identifier['decode']} ({identifier['code']})")
+            for block in [*region["requirements"], *region["clarifications"]]:
+                self.block(block)
+        if number == "12.3":
+            for name in ("amendment_statement", "overview_location", "original_protocol_approval_date"):
+                text = cell_text(fields.get(name, {}))
+                if text:
+                    self.highlighted(text)
+
+    def objectives(self, objectives: list[JsonObject]) -> None:
+        """Each objective with its estimands as one table of the ICH E9(R1) attributes."""
+        for objective in objectives:
+            statement = cell_text(objective["statement"])
+            if not statement:
+                continue
+            category = cell_text(objective["category_label"])
+            self.writer.paragraph(self.writer.styles["field_label"],
+                                  text=f"{objective['title']}{': ' + category if category else ''}")
+            self.highlighted(statement)
+            rows = [[cell_text(estimand[name]) for name in ESTIMAND_COLUMNS] + [intercurrent_text(estimand)]
+                    for estimand in objective["estimands"]]
+            rows = [row for row in rows if any(row)]
+            if rows:
+                self.writer.simple_table([[*ESTIMAND_HEADINGS, "Intercurrent Events and Strategies"], *rows])
+
+    def criterion(self, criterion: JsonObject) -> None:
+        """One numbered paragraph; the criterion's further lines (sub-items) follow as bullets."""
+        first, *rest = str(criterion["text"]["value"]).split("\n")
+        self.writer.paragraph(self.writer.styles["body"], text=f"{criterion['number']}. {first}")
+        for line in rest:
+            self.writer.paragraph(self.writer.styles["bullet"], text=line)
 
     def additional(self, node: JsonObject, level: int) -> None:
         self.heading("", str(node["title"]), level)
@@ -192,6 +286,47 @@ class DocxRenderer:
         paragraph = self.writer.doc.paragraphs[-1] if block["type"] != "table" else None
         for run in paragraph.runs if paragraph is not None else []:
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+
+def slot_text(value: object) -> str:
+    if isinstance(value, dict) and "decode" in value:
+        return str(value["decode"])
+    if isinstance(value, dict):
+        return f"{value['quantity']} {slot_text(value['unit'])}"
+    return str(value)
+
+
+def slot_displays(slot: object) -> list[str]:
+    """Display text of a slot or list of slots: filled values, or the source term of an `unsure` coded slot."""
+    if isinstance(slot, list):
+        return [text for item in slot for text in slot_displays(item)]
+    if not isinstance(slot, dict):
+        return []
+    if slot.get("status") == "filled":
+        return [slot_text(slot["value"])]
+    if slot.get("status") == "unsure" and slot.get("raw_text"):
+        return [str(slot["raw_text"])]
+    return []
+
+
+def intercurrent_text(estimand: JsonObject) -> str:
+    return "\n".join(f"{cell_text(event['description'])}: {cell_text(event['strategy'])}"
+                     for event in estimand["intercurrent_events"])
+
+
+def cell_text(slot: object) -> str:
+    return ", ".join(slot_displays(slot))
+
+
+def filled_text(fields: JsonObject, paths: list[str]) -> str:
+    """The filled slots at `paths` joined into one line; empty when none is filled."""
+    values = []
+    for path in paths:
+        slot = fields
+        for part in path.split("."):
+            slot = slot.get(part, {}) if isinstance(slot, dict) else {}
+        values.extend(slot_displays(slot))
+    return " ".join(values)
 
 
 def is_landscape(rich_blocks: list) -> bool:

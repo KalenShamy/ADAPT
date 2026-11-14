@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 
 from converter.extract.pdf import load_pdf
-from converter.generate.client import make_client
+from converter.generate.client import DEFAULT_BACKEND, make_client
+from converter.generate.fields import extract_structured_fields
 from converter.generate.fill import generate_missing
+from converter.omit import omit_empty_optional
 from converter.place import place_document
 from converter.render.docx import render_docx
 from converter.validate import load_schema, validate_document
@@ -82,11 +84,16 @@ def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_pat
              *(f"docx: {note}" for note in getattr(source, "notes", []))]
     if backend is not None:
         client = make_client(backend, model)
-        generated = generate_missing(protocol, client, schema=schema, has_v10_source=crosswalk_targets(crosswalk))
+        def schema_errors(candidate: dict[str, object]) -> list[str]:
+            return validate_document(candidate)[0]
+
+        generated = generate_missing(protocol, client, schema_errors, schema, crosswalk_targets(crosswalk))
+        generated = extract_structured_fields(generated, client, schema, schema_errors)
+        omit_empty_optional(generated, schema)
         check(generated, "generated")
         write_json(out_dir / f"{name}.generated.json", generated)
         render_docx(generated, layout, assets_dir, template, out_dir / f"{name}.docx", name)
-        lines.append(generated["processing_log"][-1]["summary"])
+        lines.extend(entry["summary"] for entry in generated["processing_log"][-8:])
     (out_dir / f"{name}.report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return lines
 
@@ -95,7 +102,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", type=Path, nargs="+", help="v010 protocols (.pdf or .docx)")
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--llm", choices=["cli", "api"], default="cli")
+    parser.add_argument("--llm", choices=["cli", "codex", "api"], default=DEFAULT_BACKEND)
     parser.add_argument("--model", help="model name for the chosen backend")
     parser.add_argument("--skip-generate", action="store_true", help="stop after the pre-LLM docx")
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
