@@ -29,6 +29,7 @@ class DocxRenderer:
 
     def render(self, protocol: JsonObject, out_path: Path) -> None:
         writer = self.writer
+        self.unplaced_front(protocol)
         writer.toc()
         writer.page_break()
         sections = protocol["sections"]
@@ -38,6 +39,15 @@ class DocxRenderer:
         writer.fill_toc(self.toc_entries)
         writer.footers(self.protocol_label)
         writer.save(str(out_path))
+
+    def unplaced_front(self, protocol: JsonObject) -> None:
+        """Front matter has no v011 slot yet; keep it ahead of the TOC as the old converter did."""
+        items = protocol.get("unplaced_v10_content", [])
+        for item in items:
+            for block in item["blocks"]:
+                self.block(block)
+        if items:
+            self.writer.page_break()
 
     def section(self, section: JsonObject, level: int) -> None:
         status = section["status"]

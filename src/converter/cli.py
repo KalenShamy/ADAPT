@@ -49,7 +49,7 @@ def convert_pdf(pdf_path: Path, out_dir: Path, template: Path, crosswalk_path: P
     lines = [f"{name}: placed {len(layout)} blocks", *report.unmatched, *report.notes]
     if backend is not None:
         client = make_client(backend, model)
-        generated = generate_missing(protocol, client)
+        generated = generate_missing(protocol, client, schema=schema)
         check(generated, "generated")
         write_json(out_dir / f"{name}.generated.json", generated)
         render_docx(generated, layout, assets_dir, template, out_dir / f"{name}.docx", name)

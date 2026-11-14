@@ -13,7 +13,7 @@ from pathlib import Path
 
 from block_xhtml import blocks_to_xhtml
 from pdf_to_cpt_docx import Figure, Paragraph, Redaction, Table
-from restructure import Subheading, iter_nodes, restructure
+from restructure import Subheading, front_parts, iter_nodes, restructure
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema"
 sys.path.insert(0, str(SCHEMA_DIR))
@@ -174,6 +174,24 @@ def place_node(protocol: JsonObject, schema: JsonObject, placer: Placer, node, t
         place_node(protocol, schema, placer, child, section)
 
 
+FRONT_SECTION_ID = "v10:front.unmapped"
+
+
+def unplaced_front(placer: Placer, front: list) -> list[JsonObject]:
+    """Title page, summary-of-changes and other front matter have no slot yet; keep them so nothing vanishes."""
+    items = []
+    for heading, blocks in front_parts(front):
+        if not blocks:
+            continue
+        title = heading.title if heading else None
+        source = {"section_id": FRONT_SECTION_ID, "found_number": None, "found_heading": title, "match": "protocol_added"}
+        placed = [placer.block(block, source) for block in blocks]
+        full_source = {**source, "portion": "all",
+                       "source_indices": [block["source_index"] for block in placed]}
+        items.append({"v10_source": full_source, "reason": "no_v11_slot", "blocks": placed})
+    return items
+
+
 def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outline, assets_dir: Path, template_file: str):
     """Return (protocol JSON, layout sidecar dict, restructure report)."""
     result = restructure(document, crosswalk, outline)
@@ -190,6 +208,7 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     placer = Placer(assets_dir)
     for root in result.nodes:
         place_node(protocol, schema, placer, root, None)
+    protocol["unplaced_v10_content"] = unplaced_front(placer, result.front + result.amendment_details)
     protocol["processing_log"] = [{
         "step": "place", "actor": copy.deepcopy(SCRIPT_ACTOR), "at": now_iso(),
         "summary": f"placed {placer.next_index} blocks from {pdf_path.name}",

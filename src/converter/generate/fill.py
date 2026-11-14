@@ -16,18 +16,34 @@ GENERATED_STATUSES = ("populated", "not_applicable", "missing")
 SCRIPT_NAME = "converter.generate.fill"
 
 
-def walk_sections(sections: dict[str, JsonObject]) -> Iterator[JsonObject]:
-    for section in sections.values():
-        yield section
+def walk_keyed_sections(sections: dict[str, JsonObject]) -> Iterator[tuple[str, JsonObject]]:
+    for key, section in sections.items():
+        yield key, section
         children = section.get("subsections")
         if isinstance(children, dict):
-            yield from walk_sections(children)
+            yield from walk_keyed_sections(children)
 
 
-def missing_sections(protocol: JsonObject) -> list[JsonObject]:
+def walk_sections(sections: dict[str, JsonObject]) -> Iterator[JsonObject]:
+    for _, section in walk_keyed_sections(sections):
+        yield section
+
+
+def allowed_statuses(schema: JsonObject, key: str) -> list[str]:
+    definition_name = "Section_" + key.replace(".", "_").replace("#", "__")
+    definition = schema["$defs"].get(definition_name, {})
+    return definition.get("properties", {}).get("status", {}).get("enum", [])
+
+
+def missing_sections(protocol: JsonObject, schema: JsonObject | None = None) -> list[JsonObject]:
+    """Missing sections; with a schema, only those whose status may become `populated`."""
     sections = protocol["sections"]
     assert isinstance(sections, dict)
-    return [section for section in walk_sections(sections) if section.get("status") == "missing"]
+    return [
+        section for key, section in walk_keyed_sections(sections)
+        if section.get("status") == "missing"
+        and (schema is None or "populated" in allowed_statuses(schema, key))
+    ]
 
 
 def source_text(protocol: JsonObject) -> str:
@@ -89,14 +105,15 @@ def apply_draft(section: JsonObject, draft: JsonObject, client: LlmClient) -> No
 
 
 def generate_missing(
-    protocol: JsonObject, client: LlmClient, validate_section: SectionValidator | None = None
+    protocol: JsonObject, client: LlmClient, validate_section: SectionValidator | None = None,
+    schema: JsonObject | None = None,
 ) -> JsonObject:
     """Return a copy of `protocol` with missing sections drafted. Failures leave the section missing and are logged."""
     result = copy.deepcopy(protocol)
     context = source_text(result)
     filled, left = [], []
-    for section in missing_sections(result):
-        number, title = str(section["number"]), str(section["title"])
+    for section in missing_sections(result, schema):
+        number, title = str(section["number"] or section["title"]), str(section["title"])
         guidance = [str(line) for line in section.get("x-guidance", [])]
         prompt = build_prompt(number, title, guidance, context)
         if try_fill(section, prompt, client, validate_section):
