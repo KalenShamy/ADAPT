@@ -111,15 +111,13 @@ def generate_missing(
     """Return a copy of `protocol` with missing sections drafted. Failures leave the section missing and are logged."""
     result = copy.deepcopy(protocol)
     context = source_text(result)
-    filled, left = [], []
+    filled, no_basis, failed = [], [], []
     for section in missing_sections(result, schema):
         number, title = str(section["number"] or section["title"]), str(section["title"])
         guidance = [str(line) for line in section.get("x-guidance", [])]
         prompt = build_prompt(number, title, guidance, context)
-        if try_fill(section, prompt, client, validate_section):
-            filled.append(number)
-        else:
-            left.append(number)
+        outcome = try_fill(section, prompt, client, validate_section)
+        {"filled": filled, "no_basis": no_basis, "failed": failed}[outcome].append(number)
     log = result.setdefault("processing_log", [])
     assert isinstance(log, list)
     log.append({
@@ -127,12 +125,14 @@ def generate_missing(
         "actor": {"kind": "llm", "name": SCRIPT_NAME, "model": client.model},
         "at": now_iso(),
         "summary": f"drafted {len(filled)} section(s): {', '.join(filled) or 'none'}; "
-                   f"left missing {len(left)}: {', '.join(left) or 'none'}",
+                   f"no basis in source for {len(no_basis)}: {', '.join(no_basis) or 'none'}; "
+                   f"failed {len(failed)}: {', '.join(failed) or 'none'}",
     })
     return result
 
 
-def try_fill(section: JsonObject, prompt: str, client: LlmClient, validate_section: SectionValidator | None) -> bool:
+def try_fill(section: JsonObject, prompt: str, client: LlmClient, validate_section: SectionValidator | None) -> str:
+    """'filled', 'no_basis' (model answered missing) or 'failed' (call, parse or validation error)."""
     for _ in range(MAX_ATTEMPTS):
         snapshot = copy.deepcopy(section)
         try:
@@ -141,11 +141,11 @@ def try_fill(section: JsonObject, prompt: str, client: LlmClient, validate_secti
             restore(section, snapshot)
             continue
         if section["status"] == "missing":
-            return False
+            return "no_basis"
         if validate_section is None or not validate_section(section):
-            return True
+            return "filled"
         restore(section, snapshot)
-    return False
+    return "failed"
 
 
 def restore(section: JsonObject, snapshot: JsonObject) -> None:

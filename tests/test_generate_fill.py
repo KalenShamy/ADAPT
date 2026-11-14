@@ -65,7 +65,7 @@ class FillTests(unittest.TestCase):
         client = FakeClient(["not json", "still not json"])
         result = generate_missing(make_protocol(), client)
         self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
-        self.assertIn("left missing 1", result["processing_log"][-1]["summary"])
+        self.assertIn("failed 1", result["processing_log"][-1]["summary"])
 
     def test_retry_succeeds_on_second_attempt(self):
         good = json.dumps({"status": "populated", "paragraphs": ["ok"], "confidence": "low"})
@@ -78,6 +78,7 @@ class FillTests(unittest.TestCase):
         result = generate_missing(make_protocol(), client)
         self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
         self.assertEqual(len(client.prompts), 1)
+        self.assertIn("no basis in source for 1", result["processing_log"][-1]["summary"])
 
     def test_not_applicable_has_no_content(self):
         client = FakeClient([json.dumps({"status": "not_applicable", "paragraphs": ["ignored"], "confidence": "high"})])
