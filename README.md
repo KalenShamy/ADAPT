@@ -1,6 +1,6 @@
 # Protocol reformatter
 
-Convert TransCelerate CPT v010 protocol PDFs into CPT v011 Word documents. Sections that v011 requires but v010 has no source for are drafted by an LLM from the protocol's own text and highlighted for review. Mapping uses `resources/research/crosswalk.tsv`.
+Convert TransCelerate CPT v010 protocol PDFs or Word files into CPT v011 Word documents. Sections that v011 requires but v010 has no source for are drafted by an LLM from the protocol's own text and highlighted for review. Mapping uses `resources/research/crosswalk.tsv`.
 
 ## Install
 

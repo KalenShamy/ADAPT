@@ -1,4 +1,4 @@
-"""Convert v010 protocol PDFs to v011: extract, place, render, LLM-generate missing sections, render again."""
+"""Convert v010 protocol PDFs or Word files to v011: extract, place, render, LLM-generate missing sections, render again."""
 
 import argparse
 import json
@@ -17,6 +17,27 @@ from restructure import load_crosswalk, template_outline
 RESOURCES = Path(__file__).resolve().parents[2] / "resources"
 DEFAULT_TEMPLATE = RESOURCES / "CPT_CoreBWE-v011.docx"
 DEFAULT_CROSSWALK = RESOURCES / "research" / "crosswalk.tsv"
+
+
+PDF_SUFFIX = ".pdf"
+DOCX_SUFFIX = ".docx"
+SUPPORTED_SUFFIXES = (PDF_SUFFIX, DOCX_SUFFIX)
+
+
+def load_docx(path: Path):
+    """Imported on first use so PDF conversion works without the docx extractor."""
+    from converter.extract.docx import load_docx as load
+    return load(path)
+
+
+def load_source(path: Path):
+    """Extract the Document with the loader that matches the file extension."""
+    suffix = path.suffix.lower()
+    if suffix == PDF_SUFFIX:
+        return load_pdf(path)
+    if suffix == DOCX_SUFFIX:
+        return load_docx(path)
+    raise ValueError(f"{path}: unsupported input type {path.suffix!r}; expected one of {', '.join(SUPPORTED_SUFFIXES)}")
 
 
 class ValidationFailed(RuntimeError):
@@ -41,22 +62,24 @@ def write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
-def convert_pdf(pdf_path: Path, out_dir: Path, template: Path, crosswalk_path: Path,
-                backend: str | None, model: str | None) -> list[str]:
+def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_path: Path,
+                  backend: str | None, model: str | None) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = pdf_path.stem
+    name = source_path.stem
     assets_dir = out_dir / f"{name}.assets"
     schema = load_schema()
     crosswalk = load_crosswalk(crosswalk_path)
+    source = load_source(source_path)
     protocol, layout, report = place_document(
-        load_pdf(pdf_path), pdf_path, schema, crosswalk, template_outline(template),
+        source, source_path, schema, crosswalk, template_outline(template),
         assets_dir, str(template.relative_to(RESOURCES.parent)),
     )
     check(protocol, "placed")
     write_json(out_dir / f"{name}.json", protocol)
     write_json(out_dir / f"{name}.layout.json", layout)
     render_docx(protocol, layout, assets_dir, template, out_dir / f"{name}.pre-llm.docx", name)
-    lines = [f"{name}: placed {len(layout)} blocks", *report.unmatched, *report.notes]
+    lines = [f"{name}: placed {len(layout)} blocks", *report.unmatched, *report.notes,
+             *(f"docx: {note}" for note in getattr(source, "notes", []))]
     if backend is not None:
         client = make_client(backend, model)
         generated = generate_missing(protocol, client, schema=schema, has_v10_source=crosswalk_targets(crosswalk))
@@ -70,7 +93,7 @@ def convert_pdf(pdf_path: Path, out_dir: Path, template: Path, crosswalk_path: P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("inputs", type=Path, nargs="+", help="v010 protocol PDFs")
+    parser.add_argument("inputs", type=Path, nargs="+", help="v010 protocols (.pdf or .docx)")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--llm", choices=["cli", "api"], default="cli")
     parser.add_argument("--model", help="model name for the chosen backend")
@@ -80,9 +103,9 @@ def main() -> None:
     args = parser.parse_args()
     backend = None if args.skip_generate else args.llm
     for path in args.inputs:
-        if path.suffix.lower() != ".pdf":
-            raise SystemExit(f"{path}: only .pdf input is supported so far")
-        for line in convert_pdf(path, args.out_dir, args.template, args.crosswalk, backend, args.model):
+        if path.suffix.lower() not in SUPPORTED_SUFFIXES:
+            raise SystemExit(f"{path}: unsupported input type {path.suffix!r}; expected .pdf or .docx")
+        for line in convert_file(path, args.out_dir, args.template, args.crosswalk, backend, args.model):
             print(line)
 
 
