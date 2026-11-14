@@ -35,13 +35,20 @@ def allowed_statuses(schema: JsonObject, key: str) -> list[str]:
     return definition.get("properties", {}).get("status", {}).get("enum", [])
 
 
-def missing_sections(protocol: JsonObject, schema: JsonObject | None = None) -> list[JsonObject]:
-    """Missing sections; with a schema, only those whose status may become `populated`."""
+def missing_sections(
+    protocol: JsonObject, schema: JsonObject | None = None, has_v10_source: frozenset[str] = frozenset()
+) -> list[JsonObject]:
+    """Missing sections; with a schema, only those whose status may become `populated`.
+
+    Sections in `has_v10_source` (v011 numbers the crosswalk fills from v010) are skipped: a gap there is a
+    placement miss, and drafting it would duplicate source content that exists elsewhere in the protocol.
+    """
     sections = protocol["sections"]
     assert isinstance(sections, dict)
     return [
         section for key, section in walk_keyed_sections(sections)
         if section.get("status") == "missing"
+        and key.split("#")[0] not in has_v10_source
         and (schema is None or "populated" in allowed_statuses(schema, key))
     ]
 
@@ -106,13 +113,13 @@ def apply_draft(section: JsonObject, draft: JsonObject, client: LlmClient) -> No
 
 def generate_missing(
     protocol: JsonObject, client: LlmClient, validate_section: SectionValidator | None = None,
-    schema: JsonObject | None = None,
+    schema: JsonObject | None = None, has_v10_source: frozenset[str] = frozenset(),
 ) -> JsonObject:
     """Return a copy of `protocol` with missing sections drafted. Failures leave the section missing and are logged."""
     result = copy.deepcopy(protocol)
     context = source_text(result)
     filled, no_basis, failed = [], [], []
-    for section in missing_sections(result, schema):
+    for section in missing_sections(result, schema, has_v10_source):
         number, title = str(section["number"] or section["title"]), str(section["title"])
         guidance = [str(line) for line in section.get("x-guidance", [])]
         prompt = build_prompt(number, title, guidance, context)

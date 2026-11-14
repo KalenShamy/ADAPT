@@ -12,6 +12,8 @@ from converter.render.docx import render_docx
 from converter.validate import load_schema, validate_document
 from restructure import load_crosswalk, template_outline
 
+
+
 RESOURCES = Path(__file__).resolve().parents[2] / "resources"
 DEFAULT_TEMPLATE = RESOURCES / "CPT_CoreBWE-v011.docx"
 DEFAULT_CROSSWALK = RESOURCES / "research" / "crosswalk.tsv"
@@ -19,6 +21,13 @@ DEFAULT_CROSSWALK = RESOURCES / "research" / "crosswalk.tsv"
 
 class ValidationFailed(RuntimeError):
     pass
+
+
+def crosswalk_targets(crosswalk: dict) -> frozenset[str]:
+    """v011 section numbers that some v010 section maps to."""
+    return frozenset(
+        number for row in crosswalk.values() for number in [row.target, *row.also] if number
+    )
 
 
 def check(protocol: dict[str, object], stage: str) -> None:
@@ -38,8 +47,9 @@ def convert_pdf(pdf_path: Path, out_dir: Path, template: Path, crosswalk_path: P
     name = pdf_path.stem
     assets_dir = out_dir / f"{name}.assets"
     schema = load_schema()
+    crosswalk = load_crosswalk(crosswalk_path)
     protocol, layout, report = place_document(
-        load_pdf(pdf_path), pdf_path, schema, load_crosswalk(crosswalk_path), template_outline(template),
+        load_pdf(pdf_path), pdf_path, schema, crosswalk, template_outline(template),
         assets_dir, str(template.relative_to(RESOURCES.parent)),
     )
     check(protocol, "placed")
@@ -49,7 +59,7 @@ def convert_pdf(pdf_path: Path, out_dir: Path, template: Path, crosswalk_path: P
     lines = [f"{name}: placed {len(layout)} blocks", *report.unmatched, *report.notes]
     if backend is not None:
         client = make_client(backend, model)
-        generated = generate_missing(protocol, client, schema=schema)
+        generated = generate_missing(protocol, client, schema=schema, has_v10_source=crosswalk_targets(crosswalk))
         check(generated, "generated")
         write_json(out_dir / f"{name}.generated.json", generated)
         render_docx(generated, layout, assets_dir, template, out_dir / f"{name}.docx", name)

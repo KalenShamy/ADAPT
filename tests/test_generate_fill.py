@@ -73,6 +73,12 @@ class FillTests(unittest.TestCase):
         result = generate_missing(make_protocol(), client)
         self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "populated")
 
+    def test_sections_with_v10_source_are_not_drafted(self):
+        client = FakeClient([])
+        result = generate_missing(make_protocol(), client, has_v10_source=frozenset({"4.2.4"}))
+        self.assertEqual(client.prompts, [])
+        self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
+
     def test_no_basis_stays_missing(self):
         client = FakeClient([json.dumps({"status": "missing", "paragraphs": []})])
         result = generate_missing(make_protocol(), client)
