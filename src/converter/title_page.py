@@ -66,6 +66,10 @@ def add_amendment_from_version(values: dict[str, str]) -> None:
         values["amendment_number"] = amendment.group()
 
 
+COMPANY_LINE = re.compile(r"[A-Z][\w&.,' -]*?(?:Pharmaceuticals|Therapeutics|Pharma|Biosciences)[\w., -]*"
+                          r"(?:Inc\.|Ltd\.?|LLC|GmbH|Corp\.|Corporation|AG|plc|S\.A\.)")
+
+
 def enrich_title(path, values, others, notes):
     """Supplement title fields from PDF page text. Other inputs have no page layout, so only the title table is used."""
     if Path(path).suffix.lower() != PDF_SUFFIX:
@@ -131,10 +135,10 @@ def enrich_title(path, values, others, notes):
     if registry:
         values["regulatory_ids"] = "; ".join(f"{label}: {identifier}" for label, identifier in dict.fromkeys(registry))
     if not values.get("sponsor"):
-        company = next((line.strip() for line in lines if line.strip() == "Regeneron Pharmaceuticals, Inc."), None)
+        company = next((line for line in lines if COMPANY_LINE.fullmatch(line)), None)
         if company:
             values["sponsor"] = company
-            notes.append("Sponsor recovered from the repeated company line in the Regeneron title-page layout")
+            notes.append(f"Sponsor recovered from the company line in the {company} title-page layout")
     if not values.get("title"):
         compound_index = next((index for index, line in enumerate(lines) if canonical_label(line) == "compound"), None)
         if compound_index is not None:

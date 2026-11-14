@@ -109,6 +109,38 @@ class RestructureTests(unittest.TestCase):
         for word in title_words:
             self.assertIn(f"{word} text.", texts)
 
+    def test_sponsor_subsection_fills_the_template_section_its_title_names(self):
+        result = self.restructure_body([
+            Heading("6", "Study Intervention and Concomitant Therapy", 5),
+            Heading("6.9", "Prior and Concomitant Therapy", 5),
+            Heading("6.9.1", "Prohibited Interventions and Procedures", 5),
+            paragraph("No live vaccines."),
+            Heading("6.9.2", "Permitted Medications and Procedures", 5),
+            paragraph("Paracetamol is allowed."),
+            Heading("6.9.3", "Dietary Supplements", 5),
+            paragraph("Report all supplements."),
+        ])
+        by_title = {node.title: node for node in iter_nodes(result.nodes)}
+        prohibited = by_title["Prohibited Concomitant Therapy"]
+        permitted = by_title["Permitted Concomitant Therapy"]
+        self.assertEqual([block.text for block in prohibited.blocks], ["No live vaccines."])
+        self.assertEqual([block.text for block in permitted.blocks], ["Paracetamol is allowed."])
+        self.assertTrue(by_title["Dietary Supplements"].from_template is False)
+        self.assertEqual([line.split(" ")[0] for line in result.report.unmatched], ["6.9.3"])
+
+    def test_template_number_survives_pruning_of_empty_siblings(self):
+        result = self.restructure_body([
+            Heading("8", "Study Assessments and Procedures", 5),
+            Heading("8.3", "Safety Assessments", 5),
+            Heading("8.3.1", "Physical Examinations", 5),
+            paragraph("Full exam."),
+            Heading("8.3.4", "Clinical Safety Laboratory Tests", 5),
+            paragraph("Blood draws."),
+        ])
+        labs = next(node for node in iter_nodes(result.nodes) if node.blocks and node.blocks[0].text == "Blood draws.")
+        self.assertEqual(labs.template_number, "8.4.4")
+        self.assertNotEqual(labs.number, labs.template_number)
+
 
 if __name__ == "__main__":
     unittest.main()

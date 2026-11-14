@@ -61,6 +61,9 @@ AMENDMENT_FRONT_HEADING = re.compile(
 MAX_HEADING_LEVEL = len(STYLE_NAMES["v011"]["headings"])  # the template has no heading style below this
 SPLITTERS = {HANDLING_ROW: "place_handling", ASSIGNMENT_ROW: "place_assignment"}
 TEMPLATE_DROPPABLE_LEVEL = 3  # template headings at this level and deeper are emitted only with content
+# Words every protocol uses in section titles; they can't tell two template sections apart
+GENERIC_TITLE_WORDS = {"trial", "study", "investigational", "noninvestigational", "intervention", "treatment",
+                       "therapy", "participant", "concomitant"}
 
 
 @dataclass
@@ -98,6 +101,7 @@ class OutNode:
     from_template: bool = True
     source_titles: list = field(default_factory=list)
     required: bool = False  # kept with a placeholder even when empty
+    template_number: str = ""  # the node's number in the v011 template; `number` shifts when empty siblings are pruned
 
 
 @dataclass
@@ -216,6 +220,10 @@ def parent_number(number):
     return number.rpartition(".")[0]
 
 
+def distinguishing_words(title):
+    return set(title_words(title)) - GENERIC_TITLE_WORDS
+
+
 def child_rows(crosswalk, parent_row_number):
     return [row for row in crosswalk.values() if parent_number(row.number) == parent_row_number]
 
@@ -295,7 +303,7 @@ def build_output_tree(outline):
     roots = []
     by_number = {}
     for heading in outline:
-        node = OutNode(heading.level, heading.title)
+        node = OutNode(heading.level, heading.title, template_number=heading.number)
         parent = by_number.get(parent_number(heading.number))
         (parent.children if parent else roots).append(node)
         by_number[heading.number] = node
@@ -345,6 +353,41 @@ class Placer:
         self.also_sources = set()
         self.primary_nodes = {}  # source number -> node that cross-references to it resolve to
         self.investigator_sections = []
+        self.template_numbers = {id(node): number for number, node in nodes_by_number.items()}
+
+    def empty_template_match(self, section, near):
+        """The one unfilled template section in `near`'s chapter that `section`'s title names, or None.
+
+        A sponsor's "Prohibited Interventions and Procedures" is the M11 "Prohibited Concomitant Therapy"
+        section: the same title once the words every title shares are set aside, and one title's remaining
+        words are all in the other's.
+        """
+        words = distinguishing_words(section.title)
+        near_number = self.template_numbers.get(id(near))
+        if not words or near_number is None:
+            return None
+        chapter = near_number.split(".")[0]
+        matches = []
+        for number, node in self.nodes.items():
+            if not (number.startswith(chapter + ".") and node.level >= TEMPLATE_DROPPABLE_LEVEL):
+                continue
+            if node.blocks or node.source_numbers or "[" in node.title:
+                continue  # filled already, or a repeating "[#]" heading that the crosswalk and splitters fill
+            template_words = distinguishing_words(resolve_template_title(node))
+            if template_words and (template_words <= words or words <= template_words):
+                matches.append(node)
+        return matches[0] if len(matches) == 1 else None
+
+    def place_unmatched(self, section, parent):
+        """Put a section with no crosswalk row under the template section its title names, else as an extra heading."""
+        node = self.empty_template_match(section, parent)
+        if node is None:
+            self.unmatched.append((section, add_extra_node(parent, section)))
+            return
+        add_content(node, section, section.blocks)
+        self.report.notes.append(f"{section.number} {section.title} matched by title to template section {node.title}")
+        for child in section.children:
+            self.place_unmatched(child, node)
 
     def place_chapter(self, section):
         row = self.matches.get(id(section))
@@ -385,7 +428,7 @@ class Placer:
             if child_row:
                 self.place_matched(child, child_row)
             else:
-                self.unmatched.append((child, add_extra_node(chapter_node or target, child)))
+                self.place_unmatched(child, chapter_node or target)
 
     def place_handling(self, section, target):
         """Split 6.2 over 6.6.1-6.6.3; sub-sections with a telling title go to that node whole."""
@@ -393,9 +436,9 @@ class Placer:
         for child in section.children:
             node_number = handling_child_target(child.title)
             if node_number is None:
-                self.unmatched.append((child, add_extra_node(target, child)))
+                self.place_unmatched(child, target)
                 self.report.split_review.append(
-                    f"{child.number} {child.title} has no telling title; kept as a heading under {target.title}")
+                    f"{child.number} {child.title} has no telling title; placed by title or kept as a heading under {target.title}")
                 continue
             node = self.nodes[node_number]
             add_content(node, child, child.blocks)
@@ -406,7 +449,7 @@ class Placer:
     def place_assignment(self, section, target):
         self.place_split(section, split_assignment(section.blocks))
         for child in section.children:
-            self.unmatched.append((child, add_extra_node(target, child)))
+            self.place_unmatched(child, target)
 
     def place_split(self, section, split):
         for node_number, blocks in split.parts.items():

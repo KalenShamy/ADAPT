@@ -13,12 +13,14 @@ from pathlib import Path
 
 from block_xhtml import blocks_to_xhtml
 from pdf_to_cpt_docx import Figure, PageMark, Paragraph, Redaction, Span, Table
+from converter.criteria import fill_criteria
+from cross_references import rewrite_cross_references
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, TitlePageFiller, collect
-from restructure import Subheading, front_parts, iter_nodes, restructure
+from restructure import Subheading, front_parts, iter_blocks, iter_nodes, restructure
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema"
 sys.path.insert(0, str(SCHEMA_DIR))
-from test_protocol_schema import minimal_instance, v10_source  # noqa: E402  (skeleton builder lives with the schema tests)
+from minimal_instance_builder import minimal_instance, v10_source  # noqa: E402
 
 type JsonObject = dict[str, object]
 
@@ -109,7 +111,8 @@ class Placer:
         """Content blocks and the section's V10Sources for one output node."""
         if node.from_template:
             source_number = node.source_numbers[0] if node.source_numbers else None
-            match = "exact"
+            renumbered = source_number is not None and source_number != node.template_number
+            match = "renumbered" if renumbered else "exact"
             section_id = f"v10:{source_number}" if source_number else f"v10:{ancestor_number}.unmapped"
         else:
             source_number = node.source_numbers[0] if node.source_numbers else None
@@ -174,7 +177,8 @@ def allowed_statuses(schema: JsonObject, number: str) -> list[str]:
 
 def place_node(protocol: JsonObject, schema: JsonObject, placer: Placer, node, template_ancestor: JsonObject | None) -> None:
     """Fill the skeleton section for a template node; keep other nodes as additional subsections of the nearest template ancestor."""
-    section = find_section(protocol, node.number) if node.from_template else None
+    template_number = node.template_number
+    section = find_section(protocol, template_number) if node.from_template else None
     if section is None:
         if template_ancestor is None:
             return
@@ -182,15 +186,15 @@ def place_node(protocol: JsonObject, schema: JsonObject, placer: Placer, node, t
             placer.additional_subsection(node, template_ancestor["number"]))
         return
     if node.blocks:
-        if "populated" in allowed_statuses(schema, node.number):
-            blocks, sources = placer.section_content(node, node.number)
+        if "populated" in allowed_statuses(schema, template_number):
+            blocks, sources = placer.section_content(node, template_number)
             section["status"] = "populated"
             section["content"] = blocks
             section["custody"] = custody("v10_derived", sources)
         else:
             held = copy.copy(node)
             held.from_template = False
-            section["additional_subsections"].append(placer.additional_subsection(held, node.number))
+            section["additional_subsections"].append(placer.additional_subsection(held, template_number))
     for child in node.children:
         place_node(protocol, schema, placer, child, section)
 
@@ -228,6 +232,10 @@ def unplaced_title_fields(placer: Placer, others: list[tuple[str | None, str]]) 
 def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outline, assets_dir: Path, template_file: str):
     """Return (protocol JSON, layout sidecar dict, restructure report)."""
     result = restructure(document, crosswalk, outline)
+    references = rewrite_cross_references(list(iter_blocks(result)), result.number_map, result.also_sources)
+    result.report.notes.append(f"Cross-references rewritten: {references.rewritten}")
+    result.report.notes.extend(f"Cross-reference to review: {entry}" for entry in references.review)
+    result.report.notes.extend(f"Cross-reference unresolved: {entry}" for entry in references.unresolved)
     protocol = minimal_instance(schema)
     protocol["source"] = {
         "path": str(pdf_path), "file_name": pdf_path.name, "sha256": file_sha256(pdf_path),
@@ -250,6 +258,7 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     protocol["unplaced_v10_content"] = (
         unplaced_front(placer, result.front + result.amendment_details) + unplaced_title_fields(placer, other_fields)
     )
+    result.report.notes.extend(fill_criteria(protocol))
     protocol["processing_log"] = [{
         "step": "place", "actor": copy.deepcopy(SCRIPT_ACTOR), "at": now_iso(),
         "summary": f"placed {placer.next_index} blocks from {pdf_path.name}",
