@@ -12549,55 +12549,6 @@
               }
             }
           }
-        },
-        {
-          "if": {
-            "not": {
-              "properties": {
-                "status": {
-                  "const": "omitted"
-                }
-              },
-              "required": [
-                "status"
-              ]
-            }
-          },
-          "then": {
-            "properties": {
-              "subsections": {
-                "properties": {
-                  "2.2.1": {
-                    "properties": {
-                      "status": {
-                        "not": {
-                          "const": "omitted"
-                        }
-                      }
-                    }
-                  },
-                  "2.2.2": {
-                    "properties": {
-                      "status": {
-                        "not": {
-                          "const": "omitted"
-                        }
-                      }
-                    }
-                  },
-                  "2.2.3": {
-                    "properties": {
-                      "status": {
-                        "not": {
-                          "const": "omitted"
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
         }
       ]
     },
@@ -12615,7 +12566,8 @@
           "enum": [
             "populated",
             "not_applicable",
-            "missing"
+            "missing",
+            "omitted"
           ]
         },
         "heading_source": {
@@ -12674,7 +12626,8 @@
           "enum": [
             "populated",
             "not_applicable",
-            "missing"
+            "missing",
+            "omitted"
           ]
         },
         "heading_source": {
@@ -12733,7 +12686,8 @@
           "enum": [
             "populated",
             "not_applicable",
-            "missing"
+            "missing",
+            "omitted"
           ]
         },
         "heading_source": {
@@ -13559,37 +13513,6 @@
               }
             }
           }
-        },
-        {
-          "if": {
-            "not": {
-              "properties": {
-                "status": {
-                  "const": "omitted"
-                }
-              },
-              "required": [
-                "status"
-              ]
-            }
-          },
-          "then": {
-            "properties": {
-              "subsections": {
-                "properties": {
-                  "4.1.1": {
-                    "properties": {
-                      "status": {
-                        "not": {
-                          "const": "omitted"
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
         }
       ]
     },
@@ -13607,7 +13530,8 @@
           "enum": [
             "populated",
             "not_applicable",
-            "missing"
+            "missing",
+            "omitted"
           ]
         },
         "heading_source": {

@@ -2424,8 +2424,10 @@
   "group": "body",
   "numbered": true,
   "numbering_source": "auto",
-  "optional": false,
-  "optional_basis": [],
+  "optional": true,
+  "optional_basis": [
+   "M11 Technical Specification (Step 4) Conformance: Optional"
+  ],
   "required": false,
   "text_expected": {
    "value": "text",
@@ -2460,8 +2462,10 @@
   "group": "body",
   "numbered": true,
   "numbering_source": "auto",
-  "optional": false,
-  "optional_basis": [],
+  "optional": true,
+  "optional_basis": [
+   "M11 Technical Specification (Step 4) Conformance: Optional"
+  ],
   "required": false,
   "text_expected": {
    "value": "text",
@@ -2498,8 +2502,10 @@
   "group": "body",
   "numbered": true,
   "numbering_source": "auto",
-  "optional": false,
-  "optional_basis": [],
+  "optional": true,
+  "optional_basis": [
+   "M11 Technical Specification (Step 4) Conformance: Optional"
+  ],
   "required": false,
   "text_expected": {
    "value": "text",
@@ -3071,8 +3077,10 @@
   "group": "body",
   "numbered": true,
   "numbering_source": "auto",
-  "optional": false,
-  "optional_basis": [],
+  "optional": true,
+  "optional_basis": [
+   "M11 Technical Specification (Step 4) Conformance: Optional"
+  ],
   "required": false,
   "text_expected": {
    "value": "text",
