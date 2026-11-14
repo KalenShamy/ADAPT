@@ -3,8 +3,10 @@
 Usage:
     python check_output.py [--template T] out/*.docx
 
-Checks: heading outline (L1/L2), styles exist in the template, no instructional text left,
-cross-references point at existing headings. Exits 1 if any check fails.
+Each docx is checked against the protocol JSON it was rendered from (<name>.generated.json for
+<name>.docx, <name>.json for <name>.pre-llm.docx). Checks: headings match the JSON's sections, every
+block's text is in the docx in order, figures are present, styles exist in the template, no
+instructional text left, cross-references point at existing headings. Exits 1 if any check fails.
 """
 
 import argparse
@@ -16,13 +18,14 @@ from pathlib import Path
 import docx
 from docx.oxml.ns import qn
 
+from converter.audit import build_audit, squash
 from cross_references import OTHER_DOCUMENT, REFERENCE, replacements_for
 from pdf_to_cpt_docx import STYLE_NAMES
-from restructure import template_outline
 
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "resources" / "CPT_CoreBWE-v011.docx"
 INSTRUCTIONAL_STYLES = {"CPT_Instructional", "CPT_Example"}
 MAX_SHOWN = 8
+PRE_LLM_SUFFIX = ".pre-llm"
 
 
 def output_outline(document):
@@ -41,35 +44,16 @@ def output_outline(document):
     return outline
 
 
-def check_outline(document, template_outline_rows, audit=None):
-    problems = []
-    output = [(level, number) for level, number, _ in output_outline(document) if level <= 2]
-    expected = [(row.level, row.number) for row in template_outline_rows if row.level <= 2]
-    rows = output_outline(document)
-    if audit:
-        if rows != [tuple(row) for row in audit["outline"]]:
-            problems.append("output heading order/numbers/titles differ from writer audit")
-        extras = {item["number"] for item in audit["extra_headings"]}
-    else:
-        extras = set()
-    actual = [(level, number, title) for level, number, title in rows if level <= 2 and number not in extras]
-    expected_rows = [row for row in template_outline_rows if row.level <= 2]
-    if len(actual) != len(expected_rows):
-        problems.append(f"template L1/L2 count {len(actual)} != {len(expected_rows)} (excluding reported extras)")
-    for found, reference in zip(actual, expected_rows):
-        level, number, title = found
-        if level != reference.level:
-            problems.append(f"{number}: heading level differs from template {reference.number}")
-        expected_title = re.sub(r"\s+", " ", reference.title).strip()
-        if "[" in expected_title:
-            # resolve_template_title may substitute the complete source title for bracketed template options.
-            resolved = next((row[2] for row in audit["outline"] if row[1] == number), None) if audit else None
-            allowed = resolved or re.sub(r"\s+", " ", expected_title.replace("[#]", "").replace("[", "").replace("]", "")).strip()
-        else:
-            allowed = expected_title
-        if re.sub(r"\s+", " ", title).strip() != allowed:
-            problems.append(f"{number}: title {title!r} != template {allowed!r}")
-    return problems, len(output), len(expected)
+def check_outline(document, audit):
+    actual = output_outline(document)
+    if actual == audit.outline:
+        return []
+    problems = [f"{len(actual)} headings in docx, {len(audit.outline)} expected from the JSON"]
+    for found, expected in zip(actual, audit.outline):
+        if found != expected:
+            problems.append(f"first heading mismatch: docx {found}, expected {expected}")
+            break
+    return problems
 
 
 def check_styles(document, template):
@@ -120,49 +104,28 @@ def all_paragraphs(document):
 
 
 def check_content(document, audit):
-    if not audit:
-        return ["missing writer audit: cannot verify narrative content"]
-    expected = {entry["id"]: entry for entry in audit["blocks"]}
-    found = {}
-    active = None
-    for element in document.element.body:
-        if element.tag == qn("w:bookmarkStart") and element.get(qn("w:name"), "").startswith("source_block_"):
-            active = element.get(qn("w:id"))
-            if active in found:
-                return [f"duplicate source block bookmark {active}"]
-            found[active] = {"text": [], "tables": 0, "figures": 0}
-        elif active and element.tag == qn("w:bookmarkEnd") and element.get(qn("w:id")) == active:
-            active = None
-        elif active:
-            texts = ["".join(text.text or "" for text in paragraph.iter(qn("w:t")))
-                     for paragraph in element.iter(qn("w:p"))]
-            found[active]["text"].extend(" ".join(texts).split())
-            found[active]["tables"] += int(element.tag == qn("w:tbl"))
-            found[active]["figures"] += len(list(element.iter(qn("w:drawing"))))
+    body_text = squash("".join(text.text or "" for text in document.element.body.iter(qn("w:t"))))
+    position = 0
+    missing = []
+    for expected in audit.blocks:
+        found_at = body_text.find(expected.text, position)
+        if found_at < 0:
+            missing.append(f"{expected.kind} in {expected.where}: {expected.text[:40]!r}")
+        else:
+            position = found_at + len(expected.text)
     problems = []
-    if set(found) != set(expected):
-        problems.append("missing or unexpected source block bookmarks")
-    for bookmark, entry in expected.items():
-        actual = found.get(bookmark)
-        if actual and any(actual[key] != entry[key] for key in ("text", "tables", "figures")):
-            problems.append(f"source block {bookmark} ({entry['type']}): text/table/figure mismatch")
-    if audit["source"]["figures"] != audit["written"]["figures"]:
-        problems.append("source figure count differs from written figure count")
-    if audit.get("unexplained_removals"):
-        problems.append(f"{len(audit['unexplained_removals'])} narrative paragraphs removed outside synopsis filtering")
-    tables = audit.get("tables")
-    if tables:
-        for index, source in enumerate(tables["sources"]):
-            copies = sum(index in origins for origins in tables["outputs"])
-            if copies == 0 and source["section"] != "1.1":
-                problems.append(f"source table {index} p{source['page']} lost outside synopsis filtering")
-            elif copies > 1 and source["section"] != "3":
-                problems.append(f"source table {index} duplicated outside objectives splitting")
-        if any(not origins for origins in tables["outputs"]):
-            problems.append("written table has no source provenance")
-    if audit["bookmark_mismatches"]:
-        problems.append(f"{len(audit['bookmark_mismatches'])} source bookmark mismatches (listed in report)")
+    if missing:
+        problems.append(f"{len(missing)} blocks missing or out of order, e.g. {missing[:MAX_SHOWN]}")
+    figures = len(list(document.element.body.iter(qn("w:drawing"))))
+    if figures < audit.figures:
+        problems.append(f"{audit.figures} figures in the JSON, {figures} in the docx")
     return problems
+
+
+def protocol_json_path(docx_path: Path) -> Path:
+    if docx_path.stem.endswith(PRE_LLM_SUFFIX):
+        return docx_path.with_name(docx_path.stem.removesuffix(PRE_LLM_SUFFIX) + ".json")
+    return docx_path.with_name(docx_path.stem + ".generated.json")
 
 
 def main():
@@ -171,27 +134,27 @@ def main():
     parser.add_argument("outputs", nargs="+", type=Path)
     args = parser.parse_args()
     template = docx.Document(str(args.template))
-    outline = template_outline(str(args.template))
     failed = False
     for path in args.outputs:
         document = docx.Document(str(path))
-        audit_path = path.with_suffix(".audit.json")
-        audit = json.loads(audit_path.read_text()) if audit_path.exists() else None
-        outline_problems, out_count, expected_count = check_outline(document, outline, audit)
-        problems = outline_problems + check_styles(document, template) + check_cross_references(document) + check_content(document, audit)
+        json_path = protocol_json_path(path)
+        if json_path.exists():
+            audit = build_audit(json.loads(json_path.read_text(encoding="utf-8")))
+            content_problems = check_outline(document, audit) + check_content(document, audit)
+        else:
+            content_problems = [f"missing protocol JSON {json_path.name}: cannot verify content"]
+        problems = content_problems + check_styles(document, template) + check_cross_references(document)
         status = "FAIL" if problems else "ok"
         failed |= bool(problems)
-        print(f"{status}  {path.name}  (L1/L2 headings: {out_count}, template: {expected_count})")
+        print(f"{status}  {path.name}  (headings: {len(output_outline(document))})")
         for problem in problems:
             print(f"      {problem}")
         report_path = path.with_suffix(".report.txt")
-        if report_path.exists():
+        if report_path.exists() and not path.stem.endswith(PRE_LLM_SUFFIX):
             text = report_path.read_text(encoding="utf-8").split("\nOutput verification\n")[0]
             text += "\nOutput verification\n" + ("\n".join(problems) if problems else "All automated DOCX checks passed") + "\n"
             if any("references to missing sections" in problem for problem in problems):
-                text += "Unresolved references remain for review: the detected source outline did not supply every required target. No replacement target was guessed; see the cross-reference entries above.\n"
-            if audit and audit["bookmark_mismatches"]:
-                text += "Bookmark differences are extraction discrepancies, not omitted validation checks. Compare the reported source pages and titles; scanned pages have no OCR and cannot supply text headings.\n"
+                text += "Unresolved references remain for review: no replacement target was guessed.\n"
             text += "Manual check still required: open in Word, update the TOC, and inspect pagination and layout against the v011 examples.\n"
             report_path.write_text(text, encoding="utf-8")
     return 1 if failed else 0
