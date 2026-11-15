@@ -45,8 +45,11 @@ class ClaudeCliClient:
             "--setting-sources", "",
         ]
         try:
+            # Explicit UTF-8: on Windows the default cp1252 cannot encode protocol text such as "≥",
+            # the stdin write fails silently and the CLI exits with "Input must be provided"
             result = subprocess.run(
-                command, input=prompt, capture_output=True, text=True, timeout=self.timeout,
+                command, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                timeout=self.timeout,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError) as error:
             raise LlmError(f"claude CLI failed: {error}") from error

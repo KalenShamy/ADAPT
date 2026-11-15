@@ -1,11 +1,13 @@
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from converter.generate.client import LlmError, make_client, parse_cli_output
+from converter.generate.client import ClaudeCliClient, LlmError, make_client, parse_cli_output
 from converter.generate.fill import generate_missing, missing_sections
 from converter.generate.guidance import section_guidance, style_example
 from converter.generate.prompts import MAX_DRAFT_WORDS, build_prompt
@@ -138,6 +140,13 @@ class ClientTests(unittest.TestCase):
             parse_cli_output(json.dumps({"is_error": True, "result": "bad"}))
         with self.assertRaises(LlmError):
             parse_cli_output("garbage")
+
+    def test_cli_sends_prompt_as_utf8(self):
+        reply = subprocess.CompletedProcess([], 0, stdout=json.dumps({"is_error": False, "result": "ok"}), stderr="")
+        with mock.patch("converter.generate.client.subprocess.run", return_value=reply) as run:
+            ClaudeCliClient().complete("Age ≥ 18 years")
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["input"], "Age ≥ 18 years")
 
     def test_unknown_backend(self):
         with self.assertRaises(ValueError):

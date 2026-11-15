@@ -1,0 +1,15 @@
+{
+ "_note": "Identifier.system URIs for the FHIR export, keyed by title_page.regulatory_identifiers[].type plus 'sponsor_protocol', 'amendment' and 'product_code'. Identifier.system is optional in the M11 profile: a type left out or set to null exports without a system. Fill the sponsor-specific ones per sponsor before sharing output.",
+ "nct_number": "https://clinicaltrials.gov/nctid",
+ "eu_ct_number": "https://euclinicaltrials.eu/clinicalTrialId",
+ "who_utn_number": null,
+ "jrct_number": null,
+ "fda_ind_number": null,
+ "ide_number": null,
+ "nmpa_ind_number": null,
+ "pediatric_investigational_plan_number": null,
+ "other": null,
+ "sponsor_protocol": null,
+ "amendment": null,
+ "product_code": null
+}
