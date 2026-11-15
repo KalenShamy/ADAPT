@@ -11,7 +11,7 @@ from datetime import date
 from converter.generate.client import LlmClient, LlmError
 from converter.generate.fill import now_iso
 from converter.generate.prompts import parse_response
-from converter.terminology import TermRegistry
+from converter.terminology import TermRegistry, normalize
 from converter.terminology.registry import default_registry
 
 type JsonObject = dict[str, object]
@@ -48,8 +48,9 @@ def code_options(code_schema: JsonObject) -> dict[str, str]:
 def describe(schema: JsonObject, node: JsonObject) -> JsonObject:
     """How to ask for and build a slot, a list of slots, or a record of them.
 
-    kinds: code, enum, integer, duration, text, date, external (a coded term looked up in a terminology, else kept as source text), list, record,
-    skip (left missing: too large a code list to offer the model).
+    kinds: code, enum, integer, number, duration, text, date, external (a coded term looked up in a terminology, else kept as source text), list, record,
+    section (a code list too long to offer the model: the model gives the section as the source writes it and
+    we match its title against the list).
     """
     node = resolve(schema, node)
     if node.get("type") == "array":
@@ -61,11 +62,13 @@ def describe(schema: JsonObject, node: JsonObject) -> JsonObject:
     value = resolve(schema, properties["value"]["anyOf"][0])
     if "oneOf" in value:
         codes = code_options(value)
-        return {"kind": "code", "codes": codes} if len(codes) <= MAX_OFFERED_CODES else {"kind": "skip"}
+        return {"kind": "code" if len(codes) <= MAX_OFFERED_CODES else "section", "codes": codes}
     if "enum" in value:
         return {"kind": "enum", "options": value["enum"]}
     if value.get("type") == "integer":
         return {"kind": "integer"}
+    if value.get("type") == "number":
+        return {"kind": "number"}
     if "quantity" in value.get("properties", {}):
         return {"kind": "duration", "codes": code_options(resolve(schema, value["properties"]["unit"]))}
     if "system" in value.get("properties", {}):
@@ -92,17 +95,20 @@ def prompt_line(name: str, description: JsonObject) -> str:
         return f"{name}: one of {json.dumps(description['options'])}"
     if kind == "integer":
         return f"{name}: whole number"
+    if kind == "number":
+        return f"{name}: number"
     if kind == "duration":
         return f'{name}: {{"quantity": whole number, "unit": one of {json.dumps(list(description["codes"]))}}}'
     if kind == "date":
         return f"{name}: date YYYY-MM-DD"
     if kind == "external":
         return f"{name}: the term as the source writes it"
+    if kind == "section":
+        return f"{name}: the number and title of the protocol section, as the source writes it"
     if kind == "list":
         return f"{name}: list of ({prompt_line('item', description['item'])})"
     if kind == "record":
-        inner = "; ".join(prompt_line(key, child) for key, child in description["fields"].items()
-                          if child["kind"] != "skip")
+        inner = "; ".join(prompt_line(key, child) for key, child in description["fields"].items())
         return f"{name}: object with {{{inner}}}"
     return f"{name}: text from the source"
 
@@ -203,6 +209,8 @@ def typed_value(description: JsonObject, raw: object) -> object | None:
         return raw if raw in description["options"] else None
     if kind == "integer":
         return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    if kind == "number":
+        return raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw >= 0 else None
     if kind == "duration" and isinstance(raw, dict):
         unit = typed_value({"kind": "code", "codes": description["codes"]}, raw.get("unit"))
         quantity = raw.get("quantity")
@@ -220,6 +228,26 @@ def typed_value(description: JsonObject, raw: object) -> object | None:
     return None
 
 
+SECTION_NUMBER_PREFIX = re.compile(r"^(?:sections?\s+)?\d+(?:\.\d+)*\.?\s*", re.IGNORECASE)
+
+
+def section_code(codes: dict[str, str], raw: str) -> JsonObject | None:
+    """The code whose section title equals the title in raw. Section numbers differ between template
+    versions, so only the title is compared."""
+    def title(text: str) -> str:
+        return normalize(SECTION_NUMBER_PREFIX.sub("", text.strip()))
+
+    raw_title = title(raw)
+    matches = [(decode, code) for decode, code in codes.items() if raw_title and title(decode) == raw_title]
+    return {"code": matches[0][1], "decode": matches[0][0]} if len(matches) == 1 else None
+
+
+def unsure_slot(raw: str, context: Context) -> JsonObject:
+    return {"value": None, "status": "unsure", "raw_text": raw.strip(), "custody": {
+        "origin": "v10_derived", "v10_sources": copy.deepcopy(context.sources), "actor": dict(SCRIPT_ACTOR),
+        "confidence": LLM_CONFIDENCE, "needs_review": True}}
+
+
 def build_slot(description: JsonObject, raw: object, context: Context, client: LlmClient) -> JsonObject:
     """A filled slot, an `unsure` slot holding the source term (external codes), or a missing slot."""
     if description["kind"] == "external":
@@ -229,9 +257,14 @@ def build_slot(description: JsonObject, raw: object, context: Context, client: L
         if term:
             return {"value": {"system": term.system, "code": term.code, "decode": term.decode},
                     "status": "filled", "raw_text": raw.strip(), "custody": ai_custody(context, client)}
-        return {"value": None, "status": "unsure", "raw_text": raw.strip(), "custody": {
-            "origin": "v10_derived", "v10_sources": copy.deepcopy(context.sources), "actor": dict(SCRIPT_ACTOR),
-            "confidence": LLM_CONFIDENCE, "needs_review": True}}
+        return unsure_slot(raw, context)
+    if description["kind"] == "section":
+        if not (isinstance(raw, str) and raw.strip()):
+            return missing_slot()
+        value = section_code(description["codes"], raw)
+        if value is None:
+            return unsure_slot(raw, context)
+        return {"value": value, "status": "filled", "raw_text": raw.strip(), "custody": ai_custody(context, client)}
     value = typed_value(description, raw)
     if value is None:
         return missing_slot()
@@ -264,6 +297,8 @@ def has_content(built: object) -> bool:
 
 def mark_section_ai(section: JsonObject, context: Context, client: LlmClient) -> None:
     """A section holding an LLM-read slot is ai_transformed as a whole (validator rule)."""
+    if "custody" not in section:
+        return
     custody = section["custody"]
     custody["origin"] = "ai_transformed"
     custody["v10_sources"] = merge_sources([custody.get("v10_sources", []), context.sources])
@@ -283,12 +318,22 @@ def ask(prompt: str, client: LlmClient) -> JsonObject | None:
         return None
 
 
+AMENDMENT_DETAILS = "amendment_details"  # the one extraction target that is a top-level block, not a section
+
+
 def section_at(protocol: JsonObject, number: str) -> JsonObject:
+    if number == AMENDMENT_DETAILS:
+        return protocol[AMENDMENT_DETAILS]
     parts = number.split(".")
     node = protocol["sections"][parts[0]]
     for depth in range(2, len(parts) + 1):
         node = node["subsections"][".".join(parts[:depth])]
     return node
+
+
+def fields_of(section: JsonObject) -> JsonObject:
+    """The slots an extraction writes into: a section's `fields`, or the amendment details block itself."""
+    return section.get("fields", section)
 
 
 def slot_at(fields: JsonObject, path: str) -> object:
@@ -364,7 +409,6 @@ def try_apply(protocol: JsonObject, section: JsonObject, apply: Callable[[], Non
 
 
 def apply_scalars(protocol, section, extraction, answers, context, client, validate, filled, rejected) -> None:
-    fields = section["fields"]
     for path, description in extraction.scalars.items():
         raw = answers.get(path)
         if raw is None:
@@ -372,7 +416,7 @@ def apply_scalars(protocol, section, extraction, answers, context, client, valid
         built = build_value(description, raw, context, client)
         if not has_content(built):
             continue
-        ok = try_apply(protocol, section, lambda: set_slot_at(section["fields"], path, built), context, client, validate)
+        ok = try_apply(protocol, section, lambda: set_slot_at(fields_of(section), path, built), context, client, validate)
         (filled if ok else rejected).append(path)
 
 
@@ -389,7 +433,7 @@ def apply_records(protocol, section, extraction, answers, context, client, valid
         if not has_content(built):
             continue
         candidate = [*kept, built]
-        if try_apply(protocol, section, lambda: section["fields"].__setitem__(name, candidate), context, client, validate):
+        if try_apply(protocol, section, lambda: fields_of(section).__setitem__(name, candidate), context, client, validate):
             kept = candidate
             filled.append(f"{name}[{index}]")
         else:
@@ -460,9 +504,28 @@ def amendment_extraction(schema: JsonObject) -> Extraction:
     )
 
 
+def amendment_details_extraction(schema: JsonObject) -> Extraction:
+    details = fields_description(schema, "AmendmentDetails")["fields"]
+    paths = [
+        "statement", "approximate_enrolled.quantity", "approximate_enrolled.unit", "enrollment_scope",
+        "primary_reasons", "primary_reason_other", "secondary_reasons", "secondary_reason_other", "summary",
+        "substantial_impact_on_safety_or_rights", "safety_or_rights_explanation",
+        "substantial_impact_on_data_reliability", "data_reliability_explanation",
+    ]
+    return Extraction(
+        "amendment_details", AMENDMENT_DETAILS, ("front", "12.3"),
+        "Details of THIS amendment (the one this document is), read from its summary of changes, rationale or "
+        "title page. Answer null when the protocol is not an amendment. For changes, one row for each change: "
+        "description, rationale, and the section it affects.",
+        {path: navigate({"fields": details}, path) for path in paths},
+        records=("changes", details["changes"]),
+    )
+
+
 def structured_extractions(schema: JsonObject) -> list[Extraction]:
     return [overall_design_extraction(schema), interventions_extraction(schema),
-            safety_reporting_extraction(schema), amendment_extraction(schema)]
+            safety_reporting_extraction(schema), amendment_extraction(schema),
+            amendment_details_extraction(schema)]
 
 
 def extract_structured_fields(protocol: JsonObject, client: LlmClient, schema: JsonObject,
@@ -471,7 +534,9 @@ def extract_structured_fields(protocol: JsonObject, client: LlmClient, schema: J
     for extraction in structured_extractions(schema):
         result = extract(result, client, schema, validate, extraction)
     result = extract_country_regions(result, client, schema, validate)
-    return extract_objectives(result, client, schema, validate)
+    result = extract_objectives(result, client, schema, validate)
+    result = fill_summary_rows(result, client, validate)
+    return extract_analyses(result, client, schema, validate)
 
 
 # ---------------------------------------------------------------- 12.2 country and region requirements
@@ -611,4 +676,132 @@ def extract_objectives(protocol: JsonObject, client: LlmClient, schema: JsonObje
 def apply_objectives(section: JsonObject, objectives: list[JsonObject]) -> None:
     section["objectives"] = objectives
     section["status"] = "container"
+    section["additional_subsections"] = []
+
+
+# ---------------------------------------------------------------- 1.1.1 synopsis rows
+
+ESTIMAND_SUMMARY_PARTS = (("Population", "population"), ("Treatment", "treatment"), ("Endpoint", "endpoint"),
+                          ("Summary", "population_level_summary"))
+SYNOPSIS_KINDS = ("primary", "secondary")
+
+
+def estimand_summary(objective: JsonObject) -> str:
+    parts = []
+    for estimand in objective["estimands"]:
+        parts.extend(f"{label}: {estimand[name]['value']}" for label, name in ESTIMAND_SUMMARY_PARTS
+                     if estimand[name]["status"] == "filled")
+    return "\n".join(parts)
+
+
+def summary_row(objective: JsonObject, context: Context, client: LlmClient) -> JsonObject:
+    summary = estimand_summary(objective)
+    return {"objective_id": objective["id"], "objective": copy.deepcopy(objective["statement"]),
+            "estimand_summary": text_slot(summary, context, client) if summary else missing_slot()}
+
+
+def fill_summary_rows(protocol: JsonObject, client: LlmClient, validate: Validator) -> JsonObject:
+    """1.1.1 lists the primary and secondary objectives from section 3 with a summary of each estimand."""
+    result = copy.deepcopy(protocol)
+    objectives = [objective for kind in SYNOPSIS_KINDS
+                  for objective in section_at(result, OBJECTIVE_KINDS[kind]).get("objectives", [])]
+    section = section_at(result, "1.1.1")
+    context = Context(sources=merge_sources([section["custody"].get("v10_sources", []),
+                                             *(objective["custody"]["v10_sources"] for objective in objectives)]))
+    rows = [summary_row(objective, context, client) for objective in objectives]
+    if rows:
+        try_apply(result, section, lambda: section["fields"].__setitem__("summary_rows", rows), context, client, validate)
+    return result
+
+
+# ---------------------------------------------------------------- 10.4 / 10.5 analyses per objective
+
+ANALYSIS_SECTIONS = {"primary": "10.4", "secondary": "10.5"}
+ANALYSIS_PARTS = ("statistical_analysis_method", "handling_of_data", "handling_of_missing_data",
+                  "sensitivity_analysis", "supplementary_analysis")
+OPTIONAL_ANALYSIS = "_Optional"
+ANALYSIS_INSTRUCTIONS = """\
+Statistical analyses for each objective below. Copy the source's wording; do not summarise or invent.
+Answer one JSON object keyed by objective id. Each value is
+  {"statistical_analysis_method": [paragraph, ...], "handling_of_data": [...], "handling_of_missing_data": [...],
+   "sensitivity_analysis": [...], "supplementary_analysis": [...]}
+with the source text that belongs under each heading, or [] when the source has none for that objective.
+When the source describes the analyses of several objectives together, give the text to each objective it covers.
+"""
+
+
+def analysis_titles(kind: str) -> dict[str, str]:
+    """The M11 headings under each objective's analysis."""
+    estimands = f"{kind.title()} Estimand(s)"
+    return {
+        "statistical_analysis_method": "Statistical Analysis Method",
+        "handling_of_data": f"Handling of Data in Relation to {estimands}",
+        "handling_of_missing_data": f"Handling of Missing Data in Relation to {estimands}",
+        "sensitivity_analysis": "Sensitivity Analysis",
+        "supplementary_analysis": "Supplementary Analysis",
+    }
+
+
+def analysis_is_optional(schema: JsonObject, section: str, name: str) -> bool:
+    definition = schema["$defs"][f"ObjectiveAnalysis_{section.replace('.', '_')}"]
+    return definition["properties"]["subsections"]["properties"][name]["$ref"].endswith(OPTIONAL_ANALYSIS)
+
+
+def build_analysis(schema: JsonObject, section: str, position: int, objective: JsonObject, kind: str,
+                   answer: object, context: Context, client: LlmClient) -> JsonObject:
+    answer = answer if isinstance(answer, dict) else {}
+    titles = analysis_titles(kind)
+    parts: JsonObject = {}
+    for index, name in enumerate(ANALYSIS_PARTS, start=1):
+        paragraphs = [text for text in answer.get(name) or [] if isinstance(text, str) and text.strip()]
+        if paragraphs:
+            status, content, custody = "populated", [ai_block(text, context, client) for text in paragraphs], \
+                ai_custody(context, client)
+        else:
+            status = "omitted" if analysis_is_optional(schema, section, name) else "missing"
+            content, custody = [], missing_slot()["custody"]
+        parts[name] = {"number": f"{section}.{position}.{index}", "title": titles[name], "status": status,
+                       "heading_source": None, "custody": custody, "content": content}
+    populated = any(part["status"] == "populated" for part in parts.values())
+    return {"objective_id": objective["id"], "number": f"{section}.{position}",
+            "title": f"{kind.title()} Objective {position}", "status": "populated" if populated else "missing",
+            "heading_source": None, "custody": ai_custody(context, client) if populated else missing_slot()["custody"],
+            "content": [], "subsections": parts}
+
+
+def extract_analyses(protocol: JsonObject, client: LlmClient, schema: JsonObject, validate: Validator) -> JsonObject:
+    """Fill 10.4 and 10.5 with one analysis per section 3 objective, from the source's analysis text.
+
+    Text the analyses replace is dropped from the section's extra headings, as for the objectives.
+    """
+    result = copy.deepcopy(protocol)
+    wanted = {kind: section_at(result, OBJECTIVE_KINDS[kind]).get("objectives", []) for kind in ANALYSIS_SECTIONS}
+    objective_lines = [f'- {objective["id"]}: {objective["statement"]["value"]}'
+                       for objectives in wanted.values() for objective in objectives
+                       if objective["statement"]["status"] == "filled"]
+    context = build_context(result, ("10",))
+    answers = None
+    if objective_lines and context.sources:
+        prompt = f"{INSTRUCTIONS}\n{ANALYSIS_INSTRUCTIONS}\nOBJECTIVES:\n" + "\n".join(objective_lines) \
+                 + f"\n\nSOURCE PROTOCOL:\n{context.text}\n"
+        answers = ask(prompt, client)
+    filled: list[str] = []
+    for kind, number in ANALYSIS_SECTIONS.items():
+        section = section_at(result, number)
+        analyses = [build_analysis(schema, number, position, objective, kind, (answers or {}).get(objective["id"]),
+                                   context, client)
+                    for position, objective in enumerate(wanted[kind], start=1)]
+        if any(analysis["status"] == "populated" for analysis in analyses) \
+                and try_apply(result, section, lambda: apply_analyses(section, analyses), context, client, validate):
+            filled.append(f"{number}[{len(analyses)}]")
+    log = result.setdefault("processing_log", [])
+    assert isinstance(log, list)
+    log.append({"step": "extract_analyses", "actor": {"kind": "llm", "name": "converter.generate.fields",
+                "model": client.model}, "at": now_iso(),
+                "summary": f"analyses: filled {len(filled)}: {', '.join(filled) or 'none'}"})
+    return result
+
+
+def apply_analyses(section: JsonObject, analyses: list[JsonObject]) -> None:
+    section["objective_analyses"] = analyses
     section["additional_subsections"] = []
