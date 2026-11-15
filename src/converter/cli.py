@@ -2,12 +2,16 @@
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from converter.extract.pdf import load_pdf
 from converter.generate.client import DEFAULT_BACKEND, make_client
+from converter.generate.context import all_section_contexts
 from converter.generate.fields import extract_structured_fields
 from converter.generate.fill import generate_missing
+from converter.generate.table_titles import title_untitled_tables
 from converter.omit import omit_empty_optional
 from converter.place import place_document
 from converter.render.docx import render_docx
@@ -19,6 +23,11 @@ from restructure import load_crosswalk, template_outline
 RESOURCES = Path(__file__).resolve().parents[2] / "resources"
 DEFAULT_TEMPLATE = RESOURCES / "CPT_CoreBWE-v011.docx"
 DEFAULT_CROSSWALK = RESOURCES / "research" / "crosswalk.tsv"
+TOOLS = RESOURCES.parent / "tools"
+DOCX_VALIDATORS = (
+    ("validate_m11", "m11", "validate_m11.py"),
+    ("validate_cesharp", "cesharp", "validate_cesharp.py"),
+)
 
 
 PDF_SUFFIX = ".pdf"
@@ -64,8 +73,26 @@ def write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
+def run_docx_validators(docx: Path, validators: dict[str, Path]) -> list[str]:
+    """Run each tools/ validator on docx, save its full report beside it, and return summary lines.
+
+    The validators need usdm4_protocol, so they run in a child process instead of being imported.
+    """
+    lines = []
+    for label, script in validators.items():
+        completed = subprocess.run([sys.executable, str(script), str(docx)], capture_output=True, text=True,
+                                   encoding="utf-8")
+        report_path = docx.with_suffix(f".{label}.txt")
+        report_path.write_text(completed.stdout or completed.stderr, encoding="utf-8")
+        summary = [line for line in completed.stdout.splitlines() if line.startswith(("Findings:", "RESULT:"))]
+        lines.append(f"{label} validation of {docx.name}: " + "; ".join(summary or [completed.stderr.strip()]))
+        lines.append(f"{label} validation report: {report_path.name}")
+    return lines
+
+
 def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_path: Path,
-                  backend: str | None, model: str | None) -> list[str]:
+                  backend: str | None, model: str | None, dump_context: bool = False,
+                  validators: dict[str, Path] | None = None) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     name = source_path.stem
     assets_dir = out_dir / f"{name}.assets"
@@ -80,6 +107,8 @@ def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_pat
     write_json(out_dir / f"{name}.json", protocol)
     write_json(out_dir / f"{name}.layout.json", layout)
     render_docx(protocol, layout, assets_dir, template, out_dir / f"{name}.pre-llm.docx", name)
+    if dump_context:
+        write_json(out_dir / f"{name}.context.json", all_section_contexts(protocol))
     lines = [f"{name}: placed {len(layout)} blocks", *report.unmatched, *report.notes,
              *(f"docx: {note}" for note in getattr(source, "notes", []))]
     if backend is not None:
@@ -89,11 +118,15 @@ def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_pat
 
         generated = generate_missing(protocol, client, schema_errors, schema, crosswalk_targets(crosswalk))
         generated = extract_structured_fields(generated, client, schema, schema_errors)
+        title_untitled_tables(generated, client)
         omit_empty_optional(generated, schema)
         check(generated, "generated")
         write_json(out_dir / f"{name}.generated.json", generated)
         render_docx(generated, layout, assets_dir, template, out_dir / f"{name}.docx", name)
         lines.extend(entry["summary"] for entry in generated["processing_log"][-8:])
+    if validators:
+        final_docx = out_dir / f"{name}.docx" if backend is not None else out_dir / f"{name}.pre-llm.docx"
+        lines.extend(run_docx_validators(final_docx, validators))
     (out_dir / f"{name}.report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return lines
 
@@ -107,12 +140,20 @@ def main() -> None:
     parser.add_argument("--skip-generate", action="store_true", help="stop after the pre-LLM docx")
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--crosswalk", type=Path, default=DEFAULT_CROSSWALK)
+    parser.add_argument("--dump-context", action="store_true",
+                        help="write <name>.context.json: each section's M11 format and the source content chosen for it")
+    parser.add_argument("--validate-m11", action="store_true",
+                        help="check the output docx against the ICH M11 rules (tools/validate_m11.py)")
+    parser.add_argument("--validate-cesharp", action="store_true",
+                        help="check the output docx's CeSHarP structure via USDM (tools/validate_cesharp.py)")
     args = parser.parse_args()
     backend = None if args.skip_generate else args.llm
+    validators = {label: TOOLS / script for flag, label, script in DOCX_VALIDATORS if getattr(args, flag)}
     for path in args.inputs:
         if path.suffix.lower() not in SUPPORTED_SUFFIXES:
             raise SystemExit(f"{path}: unsupported input type {path.suffix!r}; expected .pdf or .docx")
-        for line in convert_file(path, args.out_dir, args.template, args.crosswalk, backend, args.model):
+        for line in convert_file(path, args.out_dir, args.template, args.crosswalk, backend, args.model,
+                                 args.dump_context, validators):
             print(line)
 
 
