@@ -627,7 +627,7 @@ class Reader:
             else:
                 handled = False
             if not handled:
-                if region == "skip" and text and not TOC_STYLE.match(style_name) and not TOC_LEADER.search(text):
+                if region == "skip" and text and not self.in_contents_list(element, style_name, text):
                     region = "front"  # the contents list ended without a new heading
                 self.add_content(element, region, style_name, text, sink())
             if sink() is not None:
@@ -639,6 +639,13 @@ class Reader:
         if region == "title":
             finish_title()
         return doc
+
+    def in_contents_list(self, element: _Element, style_name: str, text: str) -> bool:
+        """A contents entry, including a wrapped one whose first line lost the TOC style and the leader."""
+        if TOC_STYLE.match(style_name) or TOC_LEADER.search(text):
+            return True
+        following = element.getnext()
+        return following is not None and local(following) == "p" and bool(TOC_STYLE.match(self.paragraph_style(following)[1]))
 
     def looks_like_front_heading(self, element: _Element, text: str) -> bool:
         spans = self.spans(element, [self.paragraph_style(element)[0]])

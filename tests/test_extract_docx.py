@@ -121,6 +121,22 @@ class ExtractDocxTests(unittest.TestCase):
         self.assertNotIn("Summary ........", " ".join(b.text for b in result.front if isinstance(b, Paragraph)))
         self.assertEqual(result.body[-1].text, "Body text.")
 
+    def test_wrapped_contents_entry_without_toc_style_does_not_end_the_contents_list(self) -> None:
+        document = new_document()
+        document.add_paragraph("Title Page", style="Heading 1 (No TOC)")
+        document.add_paragraph("Table of Contents", style="Heading 3 (No TOC)")
+        document.styles.add_style("toc 1", WD_STYLE_TYPE.PARAGRAPH).base_style = document.styles["Normal"]
+        document.add_paragraph("1. Summary\t5", style="toc 1")
+        document.add_paragraph("2. A long entry that wraps onto")
+        document.add_paragraph("a second line\t6", style="toc 1")
+        document.add_paragraph("3. Design\t7", style="toc 1")
+        document.add_paragraph("List of Abbreviations", style="Heading 3 (No TOC)")
+        with_body_start(document)
+        result, _ = self.load(document)
+        front_text = " ".join(b.text for b in result.front if isinstance(b, Paragraph))
+        self.assertNotIn("Design", front_text)
+        self.assertNotIn("long entry", front_text)
+
     def test_template_guidance_is_dropped_and_author_text_is_kept(self) -> None:
         document = new_document()
         with_body_start(document)
