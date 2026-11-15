@@ -23,6 +23,9 @@ Options:
 - `--llm cli|codex|api` picks the backend (default `codex`); `--model` overrides its model.
 - `--skip-generate` stops after the pre-LLM document and makes no LLM calls.
 - `--no-fhir` skips `<name>.fhir.json`, which is otherwise written from the generated JSON next to the docx (never written with `--skip-generate`).
+- `--dump-context` writes `<name>.context.json`: each section's M11 format and the source content chosen for it.
+- `--validate-m11` checks the final docx against the ICH M11 rules (`tools/validate_m11.py`, Python 3.12). The full report goes to `<name>.m11.txt` and a summary to `<name>.report.txt`.
+- `--validate-cesharp` checks the final docx's CeSHarP structure by importing it to USDM and running the usdm4 rules (`tools/validate_cesharp.py`). The full report goes to `<name>.cesharp.txt`. With `--skip-generate` both validators check `<name>.pre-llm.docx`.
 - `--template` and `--crosswalk` override the defaults.
 
 Per input, in `--out-dir`:
@@ -71,6 +74,22 @@ Reading the result (validator 7.0.6, checked 2026-11-14):
 - "The extension ... is not allowed to be used at this point" on the ResearchStudy extensions also appears on the IG's own examples (`package/example/ResearchStudy-*.json`). It comes from how the IG declares the extension context.
 - "No code provided, and a code is required" is a real gap in the data: see `NOT CONFORMANT` above.
 - `-tx n/a` means no code is checked against a terminology server, so every NCIt code gets a "could not be validated" warning.
+
+## Known issues
+
+Each of these changes output when fixed, so they are listed here until then.
+
+- Word input: a table cell that holds only "—" or "[REDACTED]" comes out empty.
+- Trial phase on the title page is misread for some wordings, and still marked high confidence: "Phase 1b/2" becomes Phase 2, "Phase 2b/3" becomes Phase 3, and "A Phase 2 study of drug I" becomes Phase 2/Phase 1.
+- Notes from reading the title page are not written to `<name>.report.txt`.
+- PDF input: a wrapped line that starts with a short abbreviation ("vs. placebo", "etc. were", "no. 5") starts a new paragraph mid-sentence.
+- PDF input: control characters in the PDF text (e.g. form feed) make the conversion crash. Not yet seen in a real PDF.
+- `--llm api`: one API error stops the whole LLM step instead of failing only that section. `--llm codex` can mis-read replies containing non-ASCII characters (e.g. "≥") on systems whose default encoding isn't UTF-8.
+- `--llm api` caps replies at 4096 tokens, which may cut off long objectives or analyses replies. Not checked against real protocols.
+- If the model returns a single string where a list is expected (country requirements, objectives, analyses), the text is split into one-character paragraphs.
+- `--crosswalk` is not used when building the LLM prompts' section context; those always use `resources/research/crosswalk.tsv`.
+- Renumbering (`converter/render/renumber.py`) does not count objectives or added subsections, while the docx renderer does. A section with both objectives and numbered subsections would get wrong TOC and cross-reference numbers. No current section has both.
+- The negative cases in `schema/test_protocol_schema.py` only check that validation fails, not which error it fails with, so a case can pass for the wrong reason.
 
 ## Test
 
