@@ -16,6 +16,7 @@ class CodecTests(unittest.TestCase):
         blocks = [paragraph, Paragraph([Span("bullet", True, False, False, 11)], "bullet", 2, 9, 20),
                   Paragraph([Span("child", False, True, False, 11)], "bullet", 3, 9, 32),
                   Paragraph([Span("sibling", False, False, True, 11)], "bullet", 0, 9, 8),
+                  Paragraph([Span("indented", False, False, False, 10)], "body", 0, 9, 0, indent=28.8),
                   Table([[cell, {**cell, "rowspan": 1}], [None, {**cell, "rowspan": 1}]],
                         [123.5, 88.25], 10, 9, (3.5, 2), 420.5),
                   Figure(b"image bytes", 300.25, 11, True), Redaction(12),

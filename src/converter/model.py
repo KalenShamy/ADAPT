@@ -117,6 +117,7 @@ class Paragraph:
     page: int = 0
     first_x: float = 0
     align: str = "left"  # left | center | right
+    indent: float = 0  # pt of left indent on a non-list paragraph, from the source's own formatting
 
     @property
     def text(self):

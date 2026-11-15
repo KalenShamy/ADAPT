@@ -468,7 +468,15 @@ class Reader:
             spans.insert(0, Span(self.numbering.label(*marker) + " ", False, False, False, spans[0].size))
         elif "caption" in style_name or is_caption(text):
             kind = "caption"
-        return Paragraph(spans, kind, level, self.section, align=self.alignment(element, style_id))
+        indent = self.left_indent(element, style_id) if kind == "body" and not marker else 0
+        return Paragraph(spans, kind, level, self.section, align=self.alignment(element, style_id), indent=indent)
+
+    def left_indent(self, paragraph: _Element, style_id: str | None) -> float:
+        """The paragraph's left indent in pt, set on it or by its style."""
+        ind = paragraph.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+        if ind is None:
+            ind = self.styles.lookup([style_id], "w:pPr", "w:ind")
+        return max(twips_to_pt(attr(ind, "left") or attr(ind, "start")), 0.0)
 
     def alignment(self, paragraph: _Element, style_id: str | None) -> str:
         justification = paragraph.find(f"{qn('w:pPr')}/{qn('w:jc')}")

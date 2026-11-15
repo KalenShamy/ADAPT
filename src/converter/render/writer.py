@@ -175,7 +175,10 @@ class Writer:
             caption.alignment = ALIGNMENTS[para.align]
             caption.paragraph_format.keep_with_next = True
             return caption
-        return self.paragraph(self.styles["body"], para.spans)
+        p = self.paragraph(self.styles["body"], para.spans)
+        if para.indent:
+            p.paragraph_format.left_indent = Pt(para.indent)
+        return p
 
     def _new_table(self, n_rows, n_cols):
         """An empty Table Grid table placed at the end of the body, before the final section properties."""
@@ -240,6 +243,9 @@ class Writer:
                 self.add_run(p, s, size=run_size)
         if first:
             target.paragraphs[0].style = self.doc.styles[self.styles["table_text"]]
+        for p, para in zip(target.paragraphs, cell["paragraphs"]):
+            if getattr(para, "kind", "body") == "body" and getattr(para, "indent", 0):
+                p.paragraph_format.left_indent = Pt(para.indent)
         for p in target.paragraphs:
             compact_cell_paragraph(p, font_size, keep_with_next)
             if p.style.name == self.styles["bullet"]:

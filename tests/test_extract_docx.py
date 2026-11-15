@@ -298,6 +298,24 @@ class ExtractDocxTests(unittest.TestCase):
         # Single-byte and U+F0xx codes go through the Symbol table (m is mu); real Unicode stays.
         self.assertEqual(text.text, "ALT \u2265 3 x ULN, \u2265 2 \u03bc\u2265")
 
+    def test_left_indent_is_kept_on_body_paragraphs_but_not_lists(self) -> None:
+        document = new_document()
+        with_body_start(document)
+        indented = document.styles.add_style("GuideDash", WD_STYLE_TYPE.PARAGRAPH)
+        indented.paragraph_format.left_indent = docx.shared.Twips(576)
+        direct = self.add_xml_paragraph(document, '<w:r><w:t>Direct indent</w:t></w:r>')
+        direct.insert(0, parse_xml(f'<w:pPr {nsdecls("w")}><w:ind w:left="720"/></w:pPr>'))
+        document.add_paragraph("Bulleted", style="List Bullet")
+        table = document.add_table(rows=1, cols=1)
+        table.cell(0, 0).paragraphs[0].text = "oral"
+        table.cell(0, 0).paragraphs[0].style = indented
+        result, _ = self.load(document)
+        paragraphs = {b.text: b for b in result.body if isinstance(b, Paragraph)}
+        self.assertEqual(paragraphs["Direct indent"].indent, 36.0)
+        self.assertEqual(paragraphs["Bulleted"].indent, 0)
+        cell, = next(b for b in result.body if isinstance(b, Table)).grid[0][0]["paragraphs"]
+        self.assertEqual(cell.indent, 28.8)
+
     def test_unconvertible_image_bytes_are_kept(self) -> None:
         document = new_document()
         with_body_start(document)
