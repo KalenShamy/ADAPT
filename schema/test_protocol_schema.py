@@ -15,15 +15,11 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
-from minimal_instance_builder import (  # noqa: F401
-    REPEATED_ITEM_SECTIONS_WITHOUT_ITEMS,
+from minimal_instance_builder import (
     MinimalInstanceBuilder,
-    SAMPLE_DATE,
     SAMPLE_SOURCE_INDEX,
     TEST_ACTOR,
     TIMESTAMP,
-    ZERO_SHA256,
-    analysis,
     minimal_instance,
     missing_slot,
     none_custody,
@@ -38,6 +34,7 @@ from validate_protocol import SCHEMA_PATH, load_json, validate_document
 
 ANNOTATED_SCHEMA_PATH = SCHEMA_PATH.with_name("protocol.schema.annotated.json")
 SPONSOR_ADDRESS_CODE = "C218677"
+APPENDIX_SOURCE_INDEX = 768
 
 type Json = dict[str, Json] | list[Json] | str | int | float | bool | None
 type JsonObject = dict[str, Json]
@@ -163,9 +160,6 @@ def label_paragraph(portion: str = "part", origin: str = "v10_verbatim") -> Json
     paragraph["custody"]["origin"] = origin
     paragraph["custody"]["v10_sources"][0]["portion"] = portion
     return paragraph
-
-
-APPENDIX_SOURCE_INDEX = 768
 
 
 def appendix_source(section_id: str) -> JsonObject:

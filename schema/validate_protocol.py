@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Iterator
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -161,7 +162,7 @@ def check_single_sponsor(instance: JsonObject, errors: list[str]) -> None:
         errors.append(f"$.title_page.sponsors: expected exactly one role 'sponsor', found {count}")
 
 
-def walk(node: Json, path: list[str | int]):
+def walk(node: Json, path: list[str | int]) -> Iterator[tuple[list[str | int], Json]]:
     yield path, node
     if isinstance(node, dict):
         for key, child in node.items():
@@ -436,9 +437,9 @@ def check_intervention_identifiers(instance: JsonObject, errors: list[str]) -> N
     fields = dig(section_node(instance, "1.1.2"), "fields")
     codes = list_at(fields, "intervention_codes")
     names = list_at(fields, "intervention_nonproprietary_names")
-    has_value = any(not is_missing_slot(slot) for slot in codes + names)
-    both_single_missing = len(codes) == 1 and len(names) == 1 and not has_value
-    if not has_value and not both_single_missing:
+    has_filled_slot = any(not is_missing_slot(slot) for slot in codes + names)
+    both_single_missing = len(codes) == 1 and len(names) == 1 and not has_filled_slot
+    if not has_filled_slot and not both_single_missing:
         errors.append(
             "section 1.1.2 fields: intervention_codes or intervention_nonproprietary_names "
             "needs a slot that is not missing, or both must be one missing slot"

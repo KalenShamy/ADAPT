@@ -9,7 +9,6 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
 
 from jsonschema import Draft202012Validator
 
@@ -62,6 +61,8 @@ ORIGINS_NEEDING_V10_SOURCE = ["v10_verbatim", "v10_derived", "ai_transformed"]
 ORIGINS_WITHOUT_V10_SOURCE = ["ai_generated", "template_text", "none"]
 AI_ORIGINS = ["ai_transformed", "ai_generated"]
 ORIGINS_WITHOUT_DECISION = ["template_text", "none"]
+CONFIDENCE_LEVELS = ["high", "medium", "low", "very_low", "none"]
+LOW_CONFIDENCE_LEVELS = ["low", "very_low", "none"]
 REVIEW_CLEARING_STATUSES = ["accepted", "edited"]
 REVIEW_OPEN_STATUSES = ["unreviewed", "rejected"]
 REVIEW_SIGNED_STATUSES = ["accepted", "edited", "rejected"]
@@ -212,6 +213,10 @@ def property_in(name: str, values: list[str]) -> JsonObject:
     return {"properties": {name: {"enum": values}}, "required": [name]}
 
 
+def primary_min_items(kind: str) -> JsonObject:
+    return {"minItems": 1} if kind == "primary" else {}
+
+
 def strict_object(properties: JsonObject, required: list[str] | None = None) -> JsonObject:
     names = list(properties) if required is None else required
     return {
@@ -250,9 +255,12 @@ class M11Index:
 
     def find(
         self, code: str | None = None, section: str | None = None, element_id: int | None = None
-    ) -> JsonObject | None:
+    ) -> JsonObject:
         if element_id is not None:
-            return next(item for item in self.elements if item["id"] == element_id)
+            element = next((item for item in self.elements if item["id"] == element_id), None)
+            if element is None:
+                raise KeyError(f"no M11 element with id={element_id}")
+            return element
         matches = [item for item in self.elements if item["ncit_code"] == code]
         if section is not None:
             matches = [item for item in matches if item["m11_section"] == section]
@@ -280,7 +288,7 @@ class M11Index:
         self, code: str | None = None, section: str | None = None, element_id: int | None = None
     ) -> JsonObject:
         element = self.find(code, section, element_id)
-        if element is None or not element["ncit_code"]:
+        if not element["ncit_code"]:
             return {}
         name = self.element_name(element)
         definition = (element["definition"] or "").strip()
@@ -314,17 +322,16 @@ class Codelists:
 
     def code_def(self, short_name: str) -> JsonObject:
         codelist = self.by_name[short_name]
-        terms = []
-        for term in codelist["terms"]:
-            terms.append(
-                {
-                    "properties": {
-                        "code": {"const": term["ncit_code"]},
-                        "decode": {"const": term["submission_value"]},
-                    },
-                    "required": ["code", "decode"],
-                }
-            )
+        terms = [
+            {
+                "properties": {
+                    "code": {"const": term["ncit_code"]},
+                    "decode": {"const": term["submission_value"]},
+                },
+                "required": ["code", "decode"],
+            }
+            for term in codelist["terms"]
+        ]
         return {
             "type": "object",
             "properties": {
@@ -357,19 +364,6 @@ class Codelists:
 # ---------------------------------------------------------------------------
 
 
-def review_clears_flag() -> JsonObject:
-    """Matches a custody whose review was accepted or edited by a person."""
-    return {
-        "properties": {
-            "review": {
-                "properties": {"status": {"enum": REVIEW_CLEARING_STATUSES}},
-                "required": ["status"],
-            }
-        },
-        "required": ["review"],
-    }
-
-
 def review_status_in(statuses: list[str]) -> JsonObject:
     return {
         "properties": {
@@ -383,19 +377,19 @@ def custody_defs() -> JsonObject:
     ai_without_acceptance = {
         "properties": {"origin": {"enum": AI_ORIGINS}},
         "required": ["origin"],
-        "not": review_clears_flag(),
+        "not": review_status_in(REVIEW_CLEARING_STATUSES),
     }
     low_without_acceptance = {
-        **property_in("confidence", ["low", "very_low", "none"]),
-        "not": review_clears_flag(),
+        **property_in("confidence", LOW_CONFIDENCE_LEVELS),
+        "not": review_status_in(REVIEW_CLEARING_STATUSES),
     }
-    needs_review = {"properties": {"needs_review": {"const": True}}, "required": ["needs_review"]}
+    needs_review = property_is("needs_review", True)
     custody = strict_object(
         {
             "origin": {"enum": CUSTODY_ORIGINS},
             "v10_sources": array_of(ref("V10Source")),
             "actor": ref("Actor"),
-            "confidence": {"enum": ["high", "medium", "low", "very_low", "none"]},
+            "confidence": {"enum": CONFIDENCE_LEVELS},
             "needs_review": {"type": "boolean"},
             "review": ref("Review"),
             "edited_from": strict_object(
@@ -531,7 +525,7 @@ def review_def() -> JsonObject:
 
 
 def heading_source_def() -> JsonObject:
-    definition = {
+    return {
         "allOf": [ref("V10Source"), {"properties": {"portion": {"const": "all"}}}],
         "description": (
             "The v10 heading a section was matched to, whatever its status (container, "
@@ -539,7 +533,6 @@ def heading_source_def() -> JsonObject:
             "the content only."
         ),
     }
-    return definition
 
 
 def heading_source_property() -> JsonObject:
@@ -574,7 +567,7 @@ def unsure_without_value_rule() -> JsonObject:
 
 
 def slot_rules_def() -> JsonObject:
-    needs_review = {"properties": {"needs_review": {"const": True}}, "required": ["needs_review"]}
+    needs_review = property_is("needs_review", True)
     return {
         "description": "Status rules shared by every slot.",
         "allOf": [
@@ -595,7 +588,7 @@ def slot_rules_def() -> JsonObject:
                 {
                     "properties": {
                         "custody": {
-                            "if": {"not": review_clears_flag()},
+                            "if": {"not": review_status_in(REVIEW_CLEARING_STATUSES)},
                             "then": needs_review,
                         }
                     }
@@ -1562,9 +1555,10 @@ class SectionBuilder:
     def omission_rules(self, children: list[JsonObject]) -> list[JsonObject]:
         """An omitted section omits all children; a kept one keeps its non-optional children."""
         omitted = property_is("status", "omitted")
-        child_status = lambda child, condition: {
-            self.key_of(child): {"properties": {"status": condition}}
-        }
+
+        def child_status(child: JsonObject, condition: JsonObject) -> JsonObject:
+            return {self.key_of(child): {"properties": {"status": condition}}}
+
         omit_all: JsonObject = {}
         keep_required: JsonObject = {}
         for child in children:
@@ -1641,13 +1635,14 @@ class SectionBuilder:
             properties["fields"] = ref(self.field_defs[key][0])
         for kind, info in OBJECTIVE_KINDS.items():
             if info["section"] == key:
-                kwargs = {"minItems": 1} if kind == "primary" else {}
-                properties["objectives"] = array_of(ref(f"Objective_{kind.title()}"), **kwargs)
+                properties["objectives"] = array_of(
+                    ref(f"Objective_{kind.title()}"), **primary_min_items(kind)
+                )
         for kind, analysis_key in ANALYSIS_SECTIONS.items():
             if analysis_key == key:
-                kwargs = {"minItems": 1} if kind == "primary" else {}
                 properties["objective_analyses"] = array_of(
-                    ref(f"ObjectiveAnalysis_{analysis_key.replace('.', '_')}"), **kwargs
+                    ref(f"ObjectiveAnalysis_{analysis_key.replace('.', '_')}"),
+                    **primary_min_items(kind),
                 )
         definition = strict_object(properties)
         definition["allOf"] = [ref("SectionStatusRules")]
@@ -1731,7 +1726,7 @@ class ObjectiveBuilder:
         info = OBJECTIVE_KINDS[kind]
         section = info["section"]
         elements = f"{section}.X"
-        estimand_kwargs = {"minItems": 1} if kind == "primary" else {}
+        estimand_kwargs = primary_min_items(kind)
         attribute = strict_object({"label": {"type": "string"}, "value": self.fields.text()})
         definition = strict_object(
             {
@@ -1761,7 +1756,7 @@ class ObjectiveBuilder:
         statuses = ["populated", "not_applicable", "missing"]
         if node["optional"]:
             statuses.append("omitted")
-        number_pattern = rf"^{re.escape(section)}\.\d+\.[1-5]$"
+        number_pattern = rf"^{re.escape(section)}\.\d+\.[1-{len(ANALYSIS_SUBSECTIONS)}]$"
         definition = strict_object(
             {
                 "number": {"type": "string", "pattern": number_pattern},
@@ -1935,12 +1930,12 @@ def report_unmapped_rows(crosswalk: CrosswalkSources) -> None:
             )
 
 
-def strip_annotations(node: Any, is_name_map: bool = False) -> Any:
+def strip_annotations(node: Json, is_name_map: bool = False) -> Json:
     if isinstance(node, list):
         return [strip_annotations(item) for item in node]
     if not isinstance(node, dict):
         return node
-    stripped = {}
+    stripped: JsonObject = {}
     for key, value in node.items():
         is_annotation = key in ANNOTATION_KEYWORDS or key.startswith("x-")
         if is_annotation and not is_name_map:
