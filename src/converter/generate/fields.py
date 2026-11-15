@@ -5,29 +5,58 @@ import copy
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 from converter.generate.client import LlmClient, LlmError
-from converter.generate.fill import now_iso
-from converter.generate.prompts import parse_response
+from converter.generate.context import SourceIndex, merge_sources, section_context
+from converter.generate.fill import NO_BASIS, NO_BASIS_CONFIDENCE, now_iso
+from converter.generate.guidance import format_lines, section_format
+from converter.generate.prompts import CONFIDENCE_LEVELS, parse_response
+from converter.title_page import render_values
+from pdf_to_cpt_docx import amendment_state
 from converter.terminology import TermRegistry, normalize
 from converter.terminology.registry import default_registry
 
 type JsonObject = dict[str, object]
 type Validator = Callable[[JsonObject], list[str]]
 
-MAX_CONTEXT_CHARS = 30000
 MAX_OFFERED_CODES = 40
-LLM_CONFIDENCE = "medium"
+LLM_CONFIDENCE = "medium"  # when the model gives no confidence of its own
+NOT_APPLICABLE_ANSWER = "not applicable"
 ISO_COUNTRY_SYSTEM = "ISO 3166-1"
 SCRIPT_ACTOR: JsonObject = {"kind": "script", "name": "converter.generate.fields", "version": "1"}
+EVIDENCE_KEY = "evidence"
+MIN_EVIDENCE_WORDS = 3  # shorter quotes ("24 hours", "SAE") match almost any safety text, unless they are the value
+UNSUPPORTED_NOTE = "No quote from the source supports this value."
+NOT_IN_SOURCE_KEY = "not_in_source"
+NOT_IN_SOURCE_NOTE = "The source does not state this value; the model filled in the most likely one."
+REVIEW_NOTES = (UNSUPPORTED_NOTE, NOT_IN_SOURCE_NOTE)
+QUOTE_CHARACTERS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"',
+                                  "–": "-", "—": "-", " ": " "})
+EVIDENCE_INSTRUCTION = (
+    f'Each row object also has an "{EVIDENCE_KEY}" object mapping each text field you fill to the words in the SOURCE '
+    "PROTOCOL that state it, copied exactly as one contiguous phrase. Leave a field out of "
+    f'"{EVIDENCE_KEY}" when no source words state it. Each row object also has a "{NOT_IN_SOURCE_KEY}" list naming '
+    "every field you filled although the source does not state it for this row (your most likely value); use [] "
+    "when the source states every field you filled."
+)
 
 INSTRUCTIONS = """\
 You are reading structured fields of an ICH M11 clinical trial protocol from the SOURCE PROTOCOL below.
-Use only facts the source states. Do not guess: when the source does not state a value, answer null.
+Answer every field. Use the value the source states. When the source does not state it, give the most likely value
+for this trial when what the source does say reasonably implies one. When it gives no basis even for a reasonable
+inference, answer null; never guess a date, number, dose or name. Answer "not applicable" only when the trial itself
+has no such thing (for example blinded roles in an open-label trial, a comparator description for a placebo control,
+amendment details for an original protocol), never because the source does not mention it. Silence is not a fact.
+Give each answer a confidence: "high" when the source states it directly, "medium" when you combined facts from
+several places, "low" when you inferred it from what the source says, "very_low" when it is a reasonable inference
+the source only thinly supports.
 For a field with one of a list of allowed values, answer with one of them exactly as written.
 Whole numbers only for number fields. Dates are YYYY-MM-DD.
+Text answers are finished protocol text. Never mention "the source", "the text" or "the protocol provided", and never
+write that the source does not describe something.
+For a list of rows, give only the rows that apply to this trial; never add a row only to say something does not apply.
 """
 
 
@@ -120,68 +149,39 @@ class Context:
     text: str = ""
     sources: list[JsonObject] = field(default_factory=list)
     terms: TermRegistry = field(default_factory=default_registry)
+    confidence: str = LLM_CONFIDENCE  # the model's confidence in the answer being built
 
 
-def merge_sources(source_lists: list[list[JsonObject]]) -> list[JsonObject]:
-    merged: dict[str, JsonObject] = {}
-    for sources in source_lists:
-        for source in sources:
-            existing = merged.setdefault(source["section_id"], copy.deepcopy(source))
-            existing["source_indices"] = sorted(set(existing["source_indices"]) | set(source["source_indices"]))
-    return list(merged.values())
+def with_confidence(context: Context, answer: object) -> Context:
+    """The context for building one answer, carrying the confidence the model gave it."""
+    confidence = answer.get("confidence") if isinstance(answer, dict) else None
+    return replace(context, confidence=confidence if confidence in CONFIDENCE_LEVELS else LLM_CONFIDENCE)
 
 
-def block_lines(blocks: list[JsonObject]) -> list[str]:
-    lines = []
-    for block in blocks:
-        if block["type"] == "table":
-            lines.extend(" | ".join(row) for row in block["rows"])
-        elif block.get("text"):
-            lines.append(block["text"])
-    return lines
+def answer_value(raw: object) -> tuple[object, object]:
+    """(value, the answer object holding its confidence) for a field answered as {"value": ..., "confidence": ...};
+    a bare value is taken as it is. No field's own value is an object with a "value" key."""
+    if isinstance(raw, dict) and "value" in raw:
+        return raw["value"], raw
+    return raw, None
 
 
-def text_parts(protocol: JsonObject) -> list[tuple[str, str, list[JsonObject]]]:
-    """(number, heading text, sources) for every part of the protocol that has source text, in order."""
-    parts: list[tuple[str, list[str], list[JsonObject]]] = []
-
-    def visit(node: JsonObject, number: str) -> None:
-        sources = node.get("custody", {}).get("v10_sources", [])
-        lines = block_lines(node.get("content", []))
-        if lines and node.get("status") in (None, "populated"):
-            parts.append((f"{number} {node.get('title', '')}".strip(), lines, sources))
-        for extra in node.get("additional_subsections", []):
-            visit(extra, number)
-        children = node.get("subsections")
-        for key, child in (children.items() if isinstance(children, dict) else []):
-            visit(child, str(child.get("number") or key))
-
-    for key, section in protocol["sections"].items():
-        visit(section, key)
-    for item in protocol.get("unplaced_v10_content", []):
-        heading = item["v10_source"].get("found_heading") or "front matter"
-        parts.append((f"front matter {heading}", block_lines(item["blocks"]), [item["v10_source"]]))
-    return [(heading, "\n".join(lines), sources) for heading, lines, sources in parts if lines]
+def build_context(protocol: JsonObject, number: str, seeds: tuple[str, ...] = ()) -> Context:
+    """The source text related to section `number` (converter.generate.context); `seeds` are sections known to
+    hold its facts."""
+    chosen = section_context(SourceIndex.build(protocol), number, seeds=seeds)
+    return Context(chosen.text, chosen.sources)
 
 
-def is_lead(number: str, lead_numbers: tuple[str, ...]) -> bool:
-    return any(number == lead or number.startswith(lead + ".") for lead in lead_numbers)
-
-
-def build_context(protocol: JsonObject, lead_numbers: tuple[str, ...]) -> Context:
-    """Parts whose number starts with one of `lead_numbers` first, then the rest, cut at MAX_CONTEXT_CHARS."""
-    parts = text_parts(protocol)
-    leading = [part for part in parts if is_lead(part[0].split(" ")[0], lead_numbers)]
-    rest = [part for part in parts if part not in leading]
-    context, used, total = [], [], 0
-    for heading, text, sources in leading + rest:
-        block = f"## {heading}\n{text}"
-        if total + len(block) > MAX_CONTEXT_CHARS:
-            break
-        context.append(block)
-        used.append(sources)
-        total += len(block)
-    return Context("\n\n".join(context), merge_sources(used))
+def format_block(*numbers: str) -> str:
+    """The ICH M11 format of the sections an extraction fills, for its prompt."""
+    blocks = []
+    for number in numbers:
+        section = section_format(M11_FORMAT_KEYS.get(number, number))
+        lines = format_lines(section)
+        if lines:
+            blocks.append(f"ICH M11 FORMAT FOR {number} {section.title}:\n" + "\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 # ---------------------------------------------------------------- building slots
@@ -195,7 +195,7 @@ def ai_custody(context: Context, client: LlmClient) -> JsonObject:
     return {
         "origin": "ai_transformed", "v10_sources": copy.deepcopy(context.sources),
         "actor": {"kind": "llm", "name": client.name, "model": client.model},
-        "confidence": LLM_CONFIDENCE, "needs_review": True,
+        "confidence": context.confidence, "needs_review": True,
     }
 
 
@@ -245,11 +245,21 @@ def section_code(codes: dict[str, str], raw: str) -> JsonObject | None:
 def unsure_slot(raw: str, context: Context) -> JsonObject:
     return {"value": None, "status": "unsure", "raw_text": raw.strip(), "custody": {
         "origin": "v10_derived", "v10_sources": copy.deepcopy(context.sources), "actor": dict(SCRIPT_ACTOR),
-        "confidence": LLM_CONFIDENCE, "needs_review": True}}
+        "confidence": context.confidence, "needs_review": True}}
+
+
+def not_applicable_slot(context: Context, client: LlmClient) -> JsonObject:
+    return {"value": None, "status": "not_applicable", "custody": ai_custody(context, client)}
+
+
+def is_not_applicable_answer(raw: object) -> bool:
+    """'not applicable', or the same with a reason after it ("not applicable; no devices are used")."""
+    return isinstance(raw, str) and raw.strip().lower().startswith(NOT_APPLICABLE_ANSWER)
 
 
 def build_slot(description: JsonObject, raw: object, context: Context, client: LlmClient) -> JsonObject:
-    """A filled slot, an `unsure` slot holding the source term (external codes), or a missing slot."""
+    """A filled slot, an `unsure` slot holding the source term (external codes), a not_applicable slot, or a missing
+    slot."""
     if description["kind"] == "external":
         if not (isinstance(raw, str) and raw.strip()):
             return missing_slot()
@@ -265,7 +275,12 @@ def build_slot(description: JsonObject, raw: object, context: Context, client: L
         if value is None:
             return unsure_slot(raw, context)
         return {"value": value, "status": "filled", "raw_text": raw.strip(), "custody": ai_custody(context, client)}
+    if description["kind"] == "text" and is_not_applicable_answer(raw):
+        return not_applicable_slot(context, client)
+    # coded lists can hold a real "Not applicable ..." choice, so for them a match on the list comes first
     value = typed_value(description, raw)
+    if value is None and isinstance(raw, str) and raw.strip().lower() == NOT_APPLICABLE_ANSWER:
+        return not_applicable_slot(context, client)
     if value is None:
         return missing_slot()
     return {"value": value, "status": "filled", "custody": ai_custody(context, client)}
@@ -319,6 +334,7 @@ def ask(prompt: str, client: LlmClient) -> JsonObject | None:
 
 
 AMENDMENT_DETAILS = "amendment_details"  # the one extraction target that is a top-level block, not a section
+M11_FORMAT_KEYS = {AMENDMENT_DETAILS: "Amendment Details"}
 
 
 def section_at(protocol: JsonObject, number: str) -> JsonObject:
@@ -351,6 +367,14 @@ def set_slot_at(fields: JsonObject, path: str, built: object) -> None:
     node[last] = built
 
 
+@dataclass(frozen=True)
+class ExpectedRow:
+    """A row the table should have whenever the source mentions it; models sometimes leave such rows out."""
+    name: str  # how the follow-up prompt asks for the row
+    in_source: re.Pattern[str]  # source wording that shows the protocol covers it
+    in_row: re.Pattern[str]  # matched against a row's key fields to tell whether the row is there
+
+
 @dataclass
 class Extraction:
     """What one prompt asks for, and where the answers go."""
@@ -360,6 +384,10 @@ class Extraction:
     ask_for: str  # extra instruction, task-specific
     scalars: dict[str, JsonObject] = field(default_factory=dict)  # fields path -> description
     records: tuple[str, JsonObject] | None = None  # (fields key, list description) of record-per-row answers
+    expected_rows: tuple[ExpectedRow, ...] = ()
+    row_key_fields: tuple[str, ...] = ()  # the row fields that say which expected row a row is
+    # fields a follow-up row must quote from the source; it was asked for, so it has to show the source has it
+    required_evidence: tuple[str, ...] = ()
 
 
 def extract(protocol: JsonObject, client: LlmClient, schema: JsonObject, validate: Validator,
@@ -367,7 +395,7 @@ def extract(protocol: JsonObject, client: LlmClient, schema: JsonObject, validat
     """Return a copy of `protocol` with the extraction's answers applied; answers that don't validate are dropped."""
     result = copy.deepcopy(protocol)
     section = section_at(result, extraction.section)
-    context = build_context(result, extraction.lead_numbers)
+    context = build_context(result, extraction.section, extraction.lead_numbers)
     filled, rejected = [], []
     if context.text and context.sources:
         prompt = build_prompt(extraction, context)
@@ -376,7 +404,8 @@ def extract(protocol: JsonObject, client: LlmClient, schema: JsonObject, validat
             rejected = [extraction.label]
         else:
             apply_scalars(result, section, extraction, answers, context, client, validate, filled, rejected)
-            apply_records(result, section, extraction, answers, context, client, validate, filled, rejected)
+            kept = apply_records(result, section, extraction, answers, context, client, validate, filled, rejected)
+            ask_for_missing_rows(result, section, extraction, kept, context, client, validate, filled, rejected)
     log = result.setdefault("processing_log", [])
     assert isinstance(log, list)
     log.append({"step": f"extract_{extraction.label}", "actor": {"kind": "llm", "name": "converter.generate.fields",
@@ -391,8 +420,12 @@ def build_prompt(extraction: Extraction, context: Context) -> str:
     if extraction.records:
         name, description = extraction.records
         lines.append(f"- {prompt_line(name, description)}")
-    return (f"{INSTRUCTIONS}\n{extraction.ask_for}\n\nFIELDS (answer as one JSON object keyed by field name, "
-            f"each value the answer or null):\n" + "\n".join(lines) + f"\n\nSOURCE PROTOCOL:\n{context.text}\n")
+    return (f"{INSTRUCTIONS}\n{extraction.ask_for}\n\n{format_block(extraction.section)}\n\n"
+            "FIELDS (answer as one JSON object keyed by field name; each value is "
+            '{"value": the answer, "confidence": "high" | "medium" | "low" | "very_low"}, except a list of rows, which is the list '
+            'itself with a "confidence" key in each row object):\n'
+            + "\n".join(lines) + (f"\n{EVIDENCE_INSTRUCTION}" if extraction.records else "")
+            + f"\n\nSOURCE PROTOCOL (the parts related to this section):\n{context.text}\n")
 
 
 def try_apply(protocol: JsonObject, section: JsonObject, apply: Callable[[], None], context: Context,
@@ -410,34 +443,147 @@ def try_apply(protocol: JsonObject, section: JsonObject, apply: Callable[[], Non
 
 def apply_scalars(protocol, section, extraction, answers, context, client, validate, filled, rejected) -> None:
     for path, description in extraction.scalars.items():
-        raw = answers.get(path)
+        raw, answer = answer_value(answers.get(path))
         if raw is None:
             continue
-        built = build_value(description, raw, context, client)
+        built = build_value(description, raw, with_confidence(context, answer), client)
         if not has_content(built):
             continue
         ok = try_apply(protocol, section, lambda: set_slot_at(fields_of(section), path, built), context, client, validate)
         (filled if ok else rejected).append(path)
 
 
-def apply_records(protocol, section, extraction, answers, context, client, validate, filled, rejected) -> None:
+def answered_rows(answers: JsonObject | None, name: str) -> list[object]:
+    rows, _ = answer_value((answers or {}).get(name))  # the model sometimes wraps the row list like a single field
+    return rows if isinstance(rows, list) else []
+
+
+def apply_records(protocol, section, extraction, answers, context, client, validate, filled, rejected) -> list[object]:
+    """Apply the answered rows; returns the rows kept."""
     if not extraction.records:
-        return
+        return []
+    name, _ = extraction.records
+    return apply_rows(protocol, section, extraction, answered_rows(answers, name), [], name, context, client,
+                      validate, filled, rejected)
+
+
+def apply_rows(protocol, section, extraction, rows, kept, label, context, client, validate, filled, rejected,
+               required_evidence: tuple[str, ...] = ()) -> list[object]:
+    """Add each valid row after `kept`; returns the rows kept."""
     name, description = extraction.records
-    rows = answers.get(name)
-    if not isinstance(rows, list):
-        return
-    kept: list[object] = []
+    item = description["item"]
     for index, row in enumerate(rows):
-        built = build_value(description["item"], row, context, client)
-        if not has_content(built):
+        built = build_value(item, row, with_confidence(context, row), client)
+        if not has_content(built) or is_not_applicable_row(built, item):
+            continue
+        evidence = row.get(EVIDENCE_KEY) if isinstance(row, dict) else None
+        flag_unsupported_fields(built, item, evidence, context.text)
+        flag_fields_not_in_source(built, row.get(NOT_IN_SOURCE_KEY) if isinstance(row, dict) else None)
+        if required_evidence and not quotes_required_fields(built, evidence, required_evidence):
+            rejected.append(f"{label}[{index}]")
             continue
         candidate = [*kept, built]
         if try_apply(protocol, section, lambda: fields_of(section).__setitem__(name, candidate), context, client, validate):
             kept = candidate
-            filled.append(f"{name}[{index}]")
+            filled.append(f"{label}[{index}]")
         else:
-            rejected.append(f"{name}[{index}]")
+            rejected.append(f"{label}[{index}]")
+    return kept
+
+
+def quotes_required_fields(row: JsonObject, evidence: object, required: tuple[str, ...]) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    for name in required:
+        slot = row.get(name)
+        if not isinstance(slot, dict) or slot.get("status") != "filled" or slot["custody"].get("note") in REVIEW_NOTES:
+            return False
+    return True
+
+
+def row_key_text(row: object, key_fields: tuple[str, ...]) -> str:
+    texts = []
+    for name in key_fields:
+        slot = row.get(name) if isinstance(row, dict) else None
+        value = slot.get("value") if isinstance(slot, dict) else None
+        texts.append(str(value.get("decode", "")) if isinstance(value, dict) else str(value or ""))
+    return " ".join(texts)
+
+
+def missing_rows(extraction: Extraction, kept: list[object], source_text: str) -> list[ExpectedRow]:
+    """Expected rows the source mentions but no kept row covers."""
+    keys = [row_key_text(row, extraction.row_key_fields) for row in kept]
+    return [expected for expected in extraction.expected_rows
+            if expected.in_source.search(source_text) and not any(expected.in_row.search(key) for key in keys)]
+
+
+def build_gap_prompt(extraction: Extraction, expected: ExpectedRow, context: Context) -> str:
+    name, _ = extraction.records
+    ask_for = (f"{name}: only the row for {expected.name}, as a list holding that one row. Answer "
+               f'{{"{name}": []}} when the protocol sets no reporting rule for it.')
+    return build_prompt(replace(extraction, ask_for=ask_for, scalars={}), context)
+
+
+def ask_for_missing_rows(protocol, section, extraction, kept, context, client, validate, filled, rejected) -> None:
+    """Ask once more for each expected row the first answer left out."""
+    if not extraction.records:
+        return
+    name, _ = extraction.records
+    for expected in missing_rows(extraction, kept, context.text):
+        answers = ask(build_gap_prompt(extraction, expected, context), client)
+        kept = apply_rows(protocol, section, extraction, answered_rows(answers, name), kept,
+                          f"{name}:{expected.name}", context, client, validate, filled, rejected,
+                          extraction.required_evidence)
+
+
+def normalized_for_quote(text: str) -> str:
+    text = text.translate(QUOTE_CHARACTERS).lower()
+    return " ".join(text.split())
+
+
+def is_supported(quote: object, value: str, source_text: str) -> bool:
+    """Whether `quote` is found in the source verbatim and either holds the value itself or is long enough to say
+    something."""
+    if not isinstance(quote, str):
+        return False
+    quote = normalized_for_quote(quote).strip(" .\"'…")
+    if not quote or quote not in normalized_for_quote(source_text):
+        return False
+    holds_value = normalized_for_quote(value).strip(" .") in quote
+    return holds_value or len(quote.split()) >= MIN_EVIDENCE_WORDS
+
+
+def flag_fields_not_in_source(row: JsonObject, names: object) -> None:
+    """Mark the filled fields the model says it guessed (the source has no value for them) as very_low."""
+    if not isinstance(names, list):
+        return
+    for name in names:
+        slot = row.get(name) if isinstance(name, str) else None
+        if isinstance(slot, dict) and slot.get("status") == "filled":
+            slot["custody"]["confidence"] = "very_low"
+            slot["custody"]["note"] = NOT_IN_SOURCE_NOTE
+
+
+def flag_unsupported_fields(row: JsonObject, description: JsonObject, evidence: object, source_text: str) -> None:
+    """Mark each filled text field of a row whose quote is missing or not in the source as a guess (very_low), so it
+    gets reviewed even when the model rated the row well. A row with no evidence object at all is left unchecked."""
+    if not isinstance(evidence, dict):
+        return
+    for name, child in description["fields"].items():
+        slot = row.get(name)
+        if child["kind"] != "text" or not isinstance(slot, dict) or slot.get("status") != "filled":
+            continue
+        if not is_supported(evidence.get(name), str(slot["value"]), source_text):
+            slot["custody"]["confidence"] = "very_low"
+            slot["custody"]["note"] = UNSUPPORTED_NOTE
+
+
+def is_not_applicable_row(row: JsonObject, description: JsonObject) -> bool:
+    """A row whose text fields all say "not applicable": it states that a kind of event or item does not apply, which
+    M11 tables leave out rather than list."""
+    texts = [row[name] for name, child in description["fields"].items() if child["kind"] == "text"]
+    statuses = [slot["status"] for slot in texts if isinstance(slot, dict)]
+    return "not_applicable" in statuses and "filled" not in statuses
 
 
 # ---------------------------------------------------------------- what to extract
@@ -455,6 +601,7 @@ def fields_description(schema: JsonObject, def_name: str) -> JsonObject:
 def overall_design_extraction(schema: JsonObject) -> Extraction:
     design = fields_description(schema, "Fields_1_1_2")
     paths = [
+        "intervention_codes", "intervention_nonproprietary_names", "population_diagnosis_or_condition",
         "intervention_model", "population_type", "control_type", "control_description", "intervention_assignment_method",
         "randomisation_type", "other_assignment_method", "stratification", "site_distribution", "site_geographic_scope",
         "master_protocol", "drug_device_combination_product", "adaptive_trial_design", "number_of_arms",
@@ -465,10 +612,21 @@ def overall_design_extraction(schema: JsonObject) -> Extraction:
         "population_age.maximum_unit",
     ]
     return Extraction(
-        "overall_design", "1.1.2", ("1.1", "1.1.1", "1.1.2", "4.1", "5.1", "6.1"),
+        "overall_design", "1.1.2", ("1.1", "1.1.1", "1.1.2", "4.1", "5.1", "5.2", "6.1"),
         "Fields of the Overall Design: read the trial's design, blinding, size, duration and age limits. Give a "
         "duration description (text) only when the duration is not a single number of units. Give "
-        "randomisation_type only for randomised trials and other_assignment_method only when the method is Other.",
+        "randomisation_type only for randomised trials and other_assignment_method only when the method is Other. "
+        f"Answer '{NOT_APPLICABLE_ANSWER}' for each of these when it does not apply. "
+        "intervention_codes: the sponsor's investigational product codes; intervention_nonproprietary_names: their "
+        "nonproprietary names (INN). population_diagnosis_or_condition: each condition studied, as a MedDRA preferred "
+        "term where possible, or 'N/A – Healthy' for healthy volunteers. population_age: the age limits in the "
+        "inclusion criteria; when they set no upper age limit, answer population_age.maximum "
+        f"'{NOT_APPLICABLE_ANSWER}' and population_age.maximum_unit '{NOT_APPLICABLE_ANSWER}'. master_protocol and "
+        "adaptive_trial_design: "
+        "'Yes' only when the source describes a master protocol (several sub-studies under one protocol) or "
+        "prospectively planned adaptations based on interim data; otherwise 'No'. drug_device_combination_product: "
+        "'Yes' when the investigational product is given with or through a device that is part of it; 'No' when the "
+        "source says no medical device is used (for example a Medical Devices section reading 'Not applicable').",
         {path: navigate(design, path) for path in paths},
     )
 
@@ -478,9 +636,23 @@ def interventions_extraction(schema: JsonObject) -> Extraction:
     return Extraction(
         "interventions", "6", ("6", "6.1", "1.1.2", "4.1"),
         "interventions: one row for each combination of arm and trial intervention (drug, placebo, background "
-        "therapy, device). Dose form and route: the term as the source writes it.",
+        "therapy, device). Dose form and route: the term as the source writes it. dosage_levels: only the amount "
+        "given at one administration, as a number and unit (for example '200 mg' or '20 mg/kg'), with no frequency, "
+        "cycle count or duration. regimen: the frequency in its short standard form first (for example 'Q3W' or "
+        "'once daily'), then any schedule detail.",
         records=("interventions", description),
     )
+
+
+SAFETY_EXPECTED_ROWS = (
+    ExpectedRow("Pregnancy Event", re.compile(r"pregnan", re.IGNORECASE), re.compile(r"pregnan", re.IGNORECASE)),
+    ExpectedRow("Post-Partum Event", re.compile(r"post-?partum", re.IGNORECASE),
+                re.compile(r"post-?partum", re.IGNORECASE)),
+    ExpectedRow("Lactation Event", re.compile(r"breastfe|lactat", re.IGNORECASE),
+                re.compile(r"lactat|breastfe", re.IGNORECASE)),
+    ExpectedRow("Trial Intervention Complaint", re.compile(r"complaint", re.IGNORECASE),
+                re.compile(r"complaint", re.IGNORECASE)),
+)
 
 
 def safety_reporting_extraction(schema: JsonObject) -> Extraction:
@@ -488,8 +660,14 @@ def safety_reporting_extraction(schema: JsonObject) -> Extraction:
     return Extraction(
         "safety_event_reporting", "9.2", ("9.2", "9.1", "9", "8.4"),
         "safety_event_reporting: one row for each kind of safety event the protocol says to report to the sponsor, "
-        "with when reporting starts and ends, how fast, and by what method.",
+        "with when reporting starts and ends, how fast, and by what method. Check each of these and give it its own "
+        "row when the protocol sets reporting rules for it: Adverse Event, Serious Adverse Event, Reportable Adverse "
+        "Event of Special Interest, Pregnancy Event, Post-Partum Event, Lactation Event and Trial Intervention "
+        "Complaint.",
         records=("safety_event_reporting", description),
+        expected_rows=SAFETY_EXPECTED_ROWS,
+        row_key_fields=("event_type", "other_event_type"),
+        required_evidence=("reportable_period_end", "timing_for_reporting"),
     )
 
 
@@ -497,8 +675,10 @@ def amendment_extraction(schema: JsonObject) -> Extraction:
     history = fields_description(schema, "Fields_12_3")["fields"]
     return Extraction(
         "amendment_history", "12.3", ("12.3",),
-        "Amendment history: read it from the document history, summary of changes or title page. Answer null when "
-        "the protocol shows no amendment information. For prior_amendments, one row per amendment already issued.",
+        "Amendment history: read it from the document history, summary of changes or title page. When the protocol "
+        f"has not been amended, M11 has no prior-amendment table: answer '{NOT_APPLICABLE_ANSWER}' for "
+        "overview_location and original_protocol_approval_date. For prior_amendments, one row per amendment already "
+        "issued.",
         {name: history[name] for name in ("amendment_statement", "overview_location", "original_protocol_approval_date")},
         records=("prior_amendments", history["prior_amendments"]),
     )
@@ -515,7 +695,8 @@ def amendment_details_extraction(schema: JsonObject) -> Extraction:
     return Extraction(
         "amendment_details", AMENDMENT_DETAILS, ("front", "12.3"),
         "Details of THIS amendment (the one this document is), read from its summary of changes, rationale or "
-        "title page. Answer null when the protocol is not an amendment. For changes, one row for each change: "
+        f"title page. Answer '{NOT_APPLICABLE_ANSWER}' when the protocol is not an amendment. For changes, one row "
+        "for each change: "
         "description, rationale, and the section it affects.",
         {path: navigate({"fields": details}, path) for path in paths},
         records=("changes", details["changes"]),
@@ -528,10 +709,18 @@ def structured_extractions(schema: JsonObject) -> list[Extraction]:
             amendment_details_extraction(schema)]
 
 
+def is_amendment(protocol: JsonObject) -> bool:
+    """Whether the title page gives an amendment number; the renderer shows Amendment Details only then."""
+    return amendment_state(render_values(protocol["title_page"])) != "none"
+
+
 def extract_structured_fields(protocol: JsonObject, client: LlmClient, schema: JsonObject,
                               validate: Validator) -> JsonObject:
     result = protocol
     for extraction in structured_extractions(schema):
+        # an original protocol has no current amendment; asking would only produce guessed details
+        if extraction.section == AMENDMENT_DETAILS and not is_amendment(result):
+            continue
         result = extract(result, client, schema, validate, extraction)
     result = extract_country_regions(result, client, schema, validate)
     result = extract_objectives(result, client, schema, validate)
@@ -545,7 +734,7 @@ COUNTRY_INSTRUCTIONS = """\
 Country or region specific requirements: read only text the source gives for one named country or region
 (for example "European Union", "Japan", "United States"). One entry per country or region:
   {"country_code": ISO 3166-1 alpha-3 code, "country_name": name, "requirements": [paragraph, ...],
-   "clarifications": [paragraph, ...]}
+   "clarifications": [paragraph, ...], "confidence": "high" | "medium" | "low" | "very_low"}
 requirements are the specific requirements and clarifications are explanations of differences from the global
 protocol. Copy the source's wording. Answer {"country_regions": []} when the source has no such text.
 """
@@ -581,12 +770,13 @@ def extract_country_regions(protocol: JsonObject, client: LlmClient, schema: Jso
     section = section_at(result, "12.2")
     filled: list[str] = []
     if section["status"] == "missing":
-        context = build_context(result, ("12.2", "12"))
-        answers = ask(f"{INSTRUCTIONS}\n{COUNTRY_INSTRUCTIONS}\nAnswer as one JSON object.\n\nSOURCE PROTOCOL:\n"
-                      f"{context.text}\n", client) if context.sources else None
+        context = build_context(result, "12.2", ("12",))
+        answers = ask(f"{INSTRUCTIONS}\n{COUNTRY_INSTRUCTIONS}\nAnswer as one JSON object.\n\n{format_block('12.2')}\n\n"
+                      f"SOURCE PROTOCOL (the parts related to this section):\n{context.text}\n", client) \
+            if context.sources else None
         regions: list[JsonObject] = []
         for entry in (answers or {}).get("country_regions") or []:
-            region = country_region(entry, context, client)
+            region = country_region(entry, with_confidence(context, entry), client)
             if region is None:
                 continue
             candidate = [*regions, region]
@@ -594,6 +784,10 @@ def extract_country_regions(protocol: JsonObject, client: LlmClient, schema: Jso
                          context, client, validate):
                 regions = candidate
                 filled.append(region["identifier"]["value"]["code"])
+        # M11: "If not applicable, retain the heading and enter 'Not applicable.'"
+        if answers is not None and not regions and try_apply(
+                result, section, lambda: section.__setitem__("status", "not_applicable"), context, client, validate):
+            filled.append(NOT_APPLICABLE_ANSWER)
     log = result.setdefault("processing_log", [])
     assert isinstance(log, list)
     log.append({"step": "extract_country_regions", "actor": {"kind": "llm", "name": "converter.generate.fields",
@@ -605,17 +799,18 @@ def extract_country_regions(protocol: JsonObject, client: LlmClient, schema: Jso
 # ---------------------------------------------------------------- 3 objectives and estimands
 
 OBJECTIVE_KINDS = {"primary": "3.1", "secondary": "3.2", "exploratory": "3.3"}
+OBJECTIVE_SOURCE_SECTIONS = ("1.1.1", "10.4", "10.5")  # the analysis sections often define the estimands
 OBJECTIVE_INSTRUCTIONS = """\
 Trial objectives, endpoints and estimands (ICH E9(R1)): copy the source's wording. Answer one JSON object:
 {"primary": [objective, ...], "secondary": [...], "exploratory": [...]}
 where each objective is
-  {"category": "Efficacy"/"Safety"/etc. or null, "statement": the objective as written,
-   "estimands": [{"population": text or null, "treatment": text or null, "endpoint": the endpoint(s) that
-     measure this objective, "population_level_summary": text or null,
-     "intercurrent_events": [{"description": text, "strategy": text}]}]}
-Give one estimand per objective (more only when the source defines several) and always give its endpoint.
-Leave population, treatment, summary and intercurrent events null unless the source states them. Use [] for a
-kind with no objectives.
+  {"category": "Efficacy"/"Safety"/etc., "statement": the objective as written,
+   "confidence": "high" | "medium" | "low" | "very_low",
+   "estimands": [{"population": text, "treatment": text, "endpoint": the endpoint(s) that measure this objective,
+     "population_level_summary": text, "intercurrent_events": [{"description": text, "strategy": text}]}]}
+Give one estimand per objective (more only when the source defines several) and fill every characteristic. When
+the source does not state one, give the most likely value from what it does say; set the objective's confidence to
+"very_low" when the source gives no basis for it. Use [] for a kind with no objectives.
 """
 TEXT_DESCRIPTION: JsonObject = {"kind": "text"}
 
@@ -653,14 +848,15 @@ def build_objective(kind: str, index: int, entry: object, context: Context, clie
 def extract_objectives(protocol: JsonObject, client: LlmClient, schema: JsonObject, validate: Validator) -> JsonObject:
     """Fill the 3.1-3.3 objectives; the source text they replace is dropped from that section's extra headings."""
     result = copy.deepcopy(protocol)
-    context = build_context(result, ("3", "1.1.1"))
-    answers = ask(f"{INSTRUCTIONS}\n{OBJECTIVE_INSTRUCTIONS}\n\nSOURCE PROTOCOL:\n{context.text}\n", client) \
+    context = build_context(result, "3", OBJECTIVE_SOURCE_SECTIONS)
+    answers = ask(f"{INSTRUCTIONS}\n{OBJECTIVE_INSTRUCTIONS}\n\n{format_block('3.1.1')}\n\n"
+                  f"SOURCE PROTOCOL (the parts related to this section):\n{context.text}\n", client) \
         if context.sources else None
     filled: list[str] = []
     for kind, number in OBJECTIVE_KINDS.items():
         section = section_at(result, number)
         entries = (answers or {}).get(kind)
-        objectives = [build_objective(kind, index, entry, context, client)
+        objectives = [build_objective(kind, index, entry, with_confidence(context, entry), client)
                       for index, entry in enumerate(entries if isinstance(entries, list) else [], start=1)]
         objectives = [objective for objective in objectives if objective]
         if objectives and try_apply(result, section, lambda: apply_objectives(section, objectives), context, client, validate):
@@ -696,6 +892,7 @@ def estimand_summary(objective: JsonObject) -> str:
 
 def summary_row(objective: JsonObject, context: Context, client: LlmClient) -> JsonObject:
     summary = estimand_summary(objective)
+    context = with_confidence(context, objective["custody"])
     return {"objective_id": objective["id"], "objective": copy.deepcopy(objective["statement"]),
             "estimand_summary": text_slot(summary, context, client) if summary else missing_slot()}
 
@@ -720,13 +917,18 @@ ANALYSIS_SECTIONS = {"primary": "10.4", "secondary": "10.5"}
 ANALYSIS_PARTS = ("statistical_analysis_method", "handling_of_data", "handling_of_missing_data",
                   "sensitivity_analysis", "supplementary_analysis")
 OPTIONAL_ANALYSIS = "_Optional"
+ANALYSIS_FORMAT_SECTIONS = tuple(f"10.4.X.{part}" for part in range(1, len(ANALYSIS_PARTS) + 1))
 ANALYSIS_INSTRUCTIONS = """\
 Statistical analyses for each objective below. Copy the source's wording; do not summarise or invent.
 Answer one JSON object keyed by objective id. Each value is
-  {"statistical_analysis_method": [paragraph, ...], "handling_of_data": [...], "handling_of_missing_data": [...],
-   "sensitivity_analysis": [...], "supplementary_analysis": [...]}
-with the source text that belongs under each heading, or [] when the source has none for that objective.
-When the source describes the analyses of several objectives together, give the text to each objective it covers.
+  {"statistical_analysis_method": heading, "handling_of_data": heading, "handling_of_missing_data": heading,
+   "sensitivity_analysis": heading, "supplementary_analysis": heading}
+where each heading is {"paragraphs": [paragraph, ...], "confidence": "high" | "medium" | "low" | "very_low"} with the
+source text that belongs under it. Judge each heading's confidence on its own. When the source has no text for a
+heading but what it says about that objective's analysis reasonably implies the content, write it and set that
+heading's confidence to "very_low". When the source gives no basis even for a reasonable inference, do not guess:
+answer that heading as {"status": "no_basis", "paragraphs": []}. When the source describes the analyses of several objectives together, give the text to each objective it
+covers.
 """
 
 
@@ -753,12 +955,22 @@ def build_analysis(schema: JsonObject, section: str, position: int, objective: J
     titles = analysis_titles(kind)
     parts: JsonObject = {}
     for index, name in enumerate(ANALYSIS_PARTS, start=1):
-        paragraphs = [text for text in answer.get(name) or [] if isinstance(text, str) and text.strip()]
-        if paragraphs:
-            status, content, custody = "populated", [ai_block(text, context, client) for text in paragraphs], \
-                ai_custody(context, client)
+        heading = answer.get(name)
+        has_own_confidence = isinstance(heading, dict) and "confidence" in heading
+        part_context = with_confidence(context, heading) if has_own_confidence else context
+        texts = heading.get("paragraphs") if isinstance(heading, dict) else heading
+        paragraphs = [text for text in texts or [] if isinstance(text, str) and text.strip()]
+        optional = analysis_is_optional(schema, section, name)
+        no_basis = isinstance(heading, dict) and heading.get("status") == NO_BASIS
+        if paragraphs and not no_basis:
+            status, content, custody = "populated", [ai_block(text, part_context, client) for text in paragraphs], \
+                ai_custody(part_context, client)
+        elif no_basis and not optional:
+            # a required heading the model could not write: left for a person, and marked as such when rendered
+            status, content = "missing", []
+            custody = ai_custody(replace(context, confidence=NO_BASIS_CONFIDENCE), client)
         else:
-            status = "omitted" if analysis_is_optional(schema, section, name) else "missing"
+            status = "omitted" if optional else "missing"
             content, custody = [], missing_slot()["custody"]
         parts[name] = {"number": f"{section}.{position}.{index}", "title": titles[name], "status": status,
                        "heading_source": None, "custody": custody, "content": content}
@@ -779,17 +991,18 @@ def extract_analyses(protocol: JsonObject, client: LlmClient, schema: JsonObject
     objective_lines = [f'- {objective["id"]}: {objective["statement"]["value"]}'
                        for objectives in wanted.values() for objective in objectives
                        if objective["statement"]["status"] == "filled"]
-    context = build_context(result, ("10",))
+    context = build_context(result, "10")
     answers = None
     if objective_lines and context.sources:
-        prompt = f"{INSTRUCTIONS}\n{ANALYSIS_INSTRUCTIONS}\nOBJECTIVES:\n" + "\n".join(objective_lines) \
-                 + f"\n\nSOURCE PROTOCOL:\n{context.text}\n"
+        prompt = (f"{INSTRUCTIONS}\n{ANALYSIS_INSTRUCTIONS}\n{format_block(*ANALYSIS_FORMAT_SECTIONS)}\n\n"
+                  "OBJECTIVES:\n" + "\n".join(objective_lines)
+                  + f"\n\nSOURCE PROTOCOL (the parts related to this section):\n{context.text}\n")
         answers = ask(prompt, client)
     filled: list[str] = []
     for kind, number in ANALYSIS_SECTIONS.items():
         section = section_at(result, number)
         analyses = [build_analysis(schema, number, position, objective, kind, (answers or {}).get(objective["id"]),
-                                   context, client)
+                                   with_confidence(context, (answers or {}).get(objective["id"])), client)
                     for position, objective in enumerate(wanted[kind], start=1)]
         if any(analysis["status"] == "populated" for analysis in analyses) \
                 and try_apply(result, section, lambda: apply_analyses(section, analyses), context, client, validate):

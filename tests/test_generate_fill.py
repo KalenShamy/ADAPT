@@ -71,7 +71,7 @@ class FillTests(unittest.TestCase):
         self.assertIn("failed 1", result["processing_log"][-1]["summary"])
 
     def test_m11_guidance_reaches_the_prompt(self):
-        reply = json.dumps({"status": "missing", "paragraphs": []})
+        reply = json.dumps({"status": "populated", "paragraphs": ["x"], "confidence": "high"})
         client = FakeClient([reply])
         generate_missing(make_protocol(), client)
         self.assertIn("trial duration is appropriate", client.prompts[0])
@@ -104,12 +104,25 @@ class FillTests(unittest.TestCase):
         self.assertEqual(client.prompts, [])
         self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
 
-    def test_no_basis_stays_missing(self):
-        client = FakeClient([json.dumps({"status": "missing", "paragraphs": []})])
+    def test_a_reply_with_no_output_is_retried_then_fails(self):
+        no_output = json.dumps({"status": "missing", "paragraphs": []})
+        client = FakeClient([no_output, no_output])
         result = generate_missing(make_protocol(), client)
         self.assertEqual(result["sections"]["4"]["subsections"]["4.2.4"]["status"], "missing")
+        self.assertEqual(len(client.prompts), 2)
+        self.assertIn("failed 1", result["processing_log"][-1]["summary"])
+
+    def test_no_basis_leaves_the_section_empty_with_no_confidence(self):
+        client = FakeClient([json.dumps({"status": "no_basis", "paragraphs": [], "confidence": "very_low"})])
+        result = generate_missing(make_protocol(), client)
+        section = result["sections"]["4"]["subsections"]["4.2.4"]
         self.assertEqual(len(client.prompts), 1)
-        self.assertIn("no basis in source for 1", result["processing_log"][-1]["summary"])
+        self.assertEqual(section["status"], "missing")
+        self.assertEqual(section["content"], [])
+        self.assertEqual(section["custody"]["origin"], "ai_generated")
+        self.assertEqual(section["custody"]["confidence"], "none")
+        self.assertTrue(section["custody"]["needs_review"])
+        self.assertIn("no basis 1: 4.2.4", result["processing_log"][-1]["summary"])
 
     def test_not_applicable_has_no_content(self):
         client = FakeClient([json.dumps({"status": "not_applicable", "paragraphs": ["ignored"], "confidence": "high"})])

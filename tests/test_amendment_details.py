@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from converter.generate.fields import AMENDMENT_DETAILS, amendment_details_extraction, extract, section_at, section_code
+from converter.generate.fields import AMENDMENT_DETAILS, extract_structured_fields, is_amendment, amendment_details_extraction, extract, section_at, section_code
 from converter.validate import load_schema, validate_document
 from minimal_instance_builder import minimal_instance  # noqa: E402  (schema/ is on the path via converter.validate)
 
@@ -21,6 +21,18 @@ class FakeClient:
 
     def complete(self, prompt):
         return json.dumps(self.answer)
+
+
+class RecordingClient:
+    name = "fake"
+    model = "fake"
+
+    def __init__(self):
+        self.prompts = []
+
+    def complete(self, prompt):
+        self.prompts.append(prompt)
+        return "{}"
 
 
 class SectionCodeTests(unittest.TestCase):
@@ -48,6 +60,19 @@ class AmendmentDetailsTests(unittest.TestCase):
                  "style": "Normal", "source_index": 0, "custody": custody}
         protocol["unplaced_v10_content"] = [{"v10_source": source, "reason": "no_v11_slot", "blocks": [block]}]
         return protocol
+
+    def test_original_protocol_is_not_asked_for_amendment_details(self):
+        client = RecordingClient()
+        extract_structured_fields(self.protocol(), client, self.schema, lambda candidate: [])
+        self.assertFalse([prompt for prompt in client.prompts if "Details of THIS amendment" in prompt])
+
+    def test_an_amendment_is_asked_for_its_details(self):
+        protocol = self.protocol()
+        protocol["title_page"]["amendment_identifier"]["value"] = "Amendment 2"
+        self.assertTrue(is_amendment(protocol))
+        client = RecordingClient()
+        extract_structured_fields(protocol, client, self.schema, lambda candidate: [])
+        self.assertTrue([prompt for prompt in client.prompts if "Details of THIS amendment" in prompt])
 
     def test_changes_get_a_section_code_and_a_summary_fills_the_block(self):
         client = FakeClient({

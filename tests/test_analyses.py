@@ -1,6 +1,7 @@
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -54,6 +55,36 @@ class AnalysesTests(unittest.TestCase):
         result = extract_objectives(protocol_with_source(self.schema), client, self.schema, self.validate)
         result = fill_summary_rows(result, client, self.validate)
         return extract_analyses(result, client, self.schema, self.validate)
+
+    def test_each_analysis_heading_keeps_its_own_confidence(self):
+        answer = {**ANSWER, "primary-1": {
+            "statistical_analysis_method": {"paragraphs": ["Cox model stratified by region."], "confidence": "high"},
+            "sensitivity_analysis": {"paragraphs": ["A tipping-point analysis."], "confidence": "very_low"}}}
+        client = FakeClient()
+        with mock.patch.object(FakeClient, "complete", lambda _, prompt: json.dumps(answer)):
+            result = extract_objectives(protocol_with_source(self.schema), client, self.schema, self.validate)
+            result = extract_analyses(result, client, self.schema, self.validate)
+        parts = section_at(result, "10.4")["objective_analyses"][0]["subsections"]
+        self.assertEqual(parts["statistical_analysis_method"]["custody"]["confidence"], "high")
+        self.assertEqual(parts["sensitivity_analysis"]["custody"]["confidence"], "very_low")
+        self.assertEqual(parts["sensitivity_analysis"]["content"][0]["custody"]["confidence"], "very_low")
+
+    def test_a_heading_with_no_basis_is_left_for_a_person_or_omitted_when_optional(self):
+        no_basis = {"status": "no_basis", "paragraphs": []}
+        answer = {**ANSWER, "primary-1": {
+            "statistical_analysis_method": {"paragraphs": ["Cox model stratified by region."], "confidence": "high"},
+            "handling_of_missing_data": no_basis, "sensitivity_analysis": no_basis}}
+        client = FakeClient()
+        with mock.patch.object(FakeClient, "complete", lambda _, prompt: json.dumps(answer)):
+            result = extract_objectives(protocol_with_source(self.schema), client, self.schema, self.validate)
+            result = extract_analyses(result, client, self.schema, self.validate)
+        parts = section_at(result, "10.4")["objective_analyses"][0]["subsections"]
+        required = parts["handling_of_missing_data"]
+        self.assertEqual((required["status"], required["content"]), ("missing", []))
+        self.assertEqual(required["custody"]["confidence"], "none")
+        self.assertEqual(required["custody"]["origin"], "ai_transformed")
+        self.assertEqual(parts["sensitivity_analysis"]["status"], "omitted")
+        self.assertEqual(self.validate(result), [])
 
     def test_synopsis_rows_link_to_the_section_3_objectives(self):
         result = self.run_steps()

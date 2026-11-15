@@ -5793,7 +5793,9 @@
           "enum": [
             "high",
             "medium",
-            "low"
+            "low",
+            "very_low",
+            "none"
           ]
         },
         "needs_review": {
@@ -6042,7 +6044,11 @@
           "if": {
             "properties": {
               "confidence": {
-                "const": "low"
+                "enum": [
+                  "low",
+                  "very_low",
+                  "none"
+                ]
               }
             },
             "required": [
@@ -22698,6 +22704,9 @@
               "type": "string"
             }
           }
+        },
+        "title": {
+          "type": "string"
         },
         "source_index": {
           "type": "integer",

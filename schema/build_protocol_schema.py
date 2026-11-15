@@ -386,7 +386,7 @@ def custody_defs() -> JsonObject:
         "not": review_clears_flag(),
     }
     low_without_acceptance = {
-        **property_is("confidence", "low"),
+        **property_in("confidence", ["low", "very_low", "none"]),
         "not": review_clears_flag(),
     }
     needs_review = {"properties": {"needs_review": {"const": True}}, "required": ["needs_review"]}
@@ -395,7 +395,7 @@ def custody_defs() -> JsonObject:
             "origin": {"enum": CUSTODY_ORIGINS},
             "v10_sources": array_of(ref("V10Source")),
             "actor": ref("Actor"),
-            "confidence": {"enum": ["high", "medium", "low"]},
+            "confidence": {"enum": ["high", "medium", "low", "very_low", "none"]},
             "needs_review": {"type": "boolean"},
             "review": ref("Review"),
             "edited_from": strict_object(
@@ -718,11 +718,16 @@ def block_defs() -> JsonObject:
         {
             "type": {"const": "table"},
             "rows": array_of(array_of({"type": "string"})),
+            "title": {"type": "string"},
             "source_index": source_index,
             "part": part,
             "custody": custody_ref,
         },
         ["type", "rows", "custody"],
+    )
+    table["description"] = (
+        "title names a table the source gave no caption, for the rendered 'Table N: title' caption; "
+        "a captioned source table keeps its caption as the paragraph above it."
     )
     heading = strict_object(
         {
