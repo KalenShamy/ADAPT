@@ -44,6 +44,10 @@ Each draft prompt carries the ICH M11 specification's user guidance for that sec
 
 Input is a PDF or a Word (.docx) file. In a .docx, tracked insertions are kept and tracked deletions are dropped. In a PDF, scanned pages stay images; there is no OCR. In Word, update the table of contents to populate page numbers.
 
+## Web frontend
+
+[clinical-document-converter](https://github.com/PoorviS123/clinical-document-converter) is a local Flask app that runs this converter from the browser: upload a protocol, download the outputs, preview the documents, and review AI-drafted sections and values that need human input. It calls this repo's CLI through `.venv`, so install this repo first. It looks for this repo at `../ADAPT`; set `ADAPT_DIR` if it is somewhere else. It starts in demo mode with saved outputs; set `DEMO=0` to run real conversions. See its README for setup.
+
 ## FHIR export
 
 `src/converter/export/fhir.py` turns protocol JSON into a FHIR `document` Bundle for the HL7 Clinical Study Protocol IG 1.0.0-ballot2 (FHIR 6.0.0-ballot3, package in `resources/reference/hl7-fhir/package.tgz`). It follows the IG's mapping sheet, `resources/M11 to FHIR Mapping 02.xlsx`:
