@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 # Backend used when --llm is not given: "cli" (claude), "codex" or "api".
-DEFAULT_BACKEND = "cli"
+DEFAULT_BACKEND = "codex"
 DEFAULT_MODEL = "sonnet"
 CLI_TIMEOUT_SECONDS = 300
 API_MAX_TOKENS = 4096

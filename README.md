@@ -9,7 +9,7 @@ uv venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-The default LLM backend runs the local `claude` CLI, so it needs Claude Code installed and signed in. `--llm codex` runs the local `codex` CLI instead (Codex installed and signed in). For the API backend, also run `uv pip install anthropic` and set `ANTHROPIC_API_KEY`.
+The default LLM backend runs the local `codex` CLI, so it needs Codex installed and signed in. `--llm cli` runs the local `claude` CLI instead (Claude Code installed and signed in). For the API backend, also run `uv pip install anthropic` and set `ANTHROPIC_API_KEY`.
 
 ## Convert
 
@@ -20,7 +20,7 @@ cd src
 
 Options:
 
-- `--llm cli|codex|api` picks the backend (default `cli`); `--model` overrides its model.
+- `--llm cli|codex|api` picks the backend (default `codex`); `--model` overrides its model.
 - `--skip-generate` stops after the pre-LLM document and makes no LLM calls.
 - `--template` and `--crosswalk` override the defaults.
 
