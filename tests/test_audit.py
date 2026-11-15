@@ -1,14 +1,11 @@
-import sys
 import unittest
 from pathlib import Path
 
 import docx
 
-SRC = Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SRC))
-
-from check_output import check_content, protocol_json_path  # noqa: E402
-from converter.audit import build_audit  # noqa: E402
+import paths  # noqa: F401
+from check_output import check_content
+from converter.audit import build_audit, protocol_json_path
 
 
 def paragraph(text: str, **extra: object) -> dict[str, object]:

@@ -6,14 +6,13 @@ renumber the remaining headings; the table of contents and "Section N" reference
 
 import re
 
-from cross_references import OTHER_DOCUMENT, REFERENCE, block_paragraphs, list_numbers, replace_text
-from pdf_to_cpt_docx import advance
+from converter.cross_references import OTHER_DOCUMENT, REFERENCE, block_paragraphs, list_numbers, replace_text
+from converter.model import JsonObject, advance
 
 NUMBER_PART = re.compile(r"^[\d.]+")
 # Schema sections with no number of their own that the CPT template still styles as a numbered Heading 4
 NUMBERED_TITLES_WITHOUT_M11_NUMBER = {"Time Period for Detecting Medical Device Deficiencies"}
 
-type JsonObject = dict[str, object]
 Edit = tuple[int, int, str]
 
 

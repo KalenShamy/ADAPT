@@ -1,6 +1,6 @@
 """Extract the per-section "User Guidance" text from the ICH M11 Technical Specification PDF.
 
-Usage: python extract_m11_guidance.py <TechnicalSpecification.pdf> <out.json>
+Usage: python tools/extract_m11_guidance.py <TechnicalSpecification.pdf> <out.json>
 Output maps a section number ("4.2.4") to the guidance paragraphs the spec gives for that section's text element.
 """
 
@@ -45,10 +45,10 @@ def guidance_by_section(spec_text: str) -> dict[str, str]:
 def main() -> None:
     pdf_path, out_path = sys.argv[1], sys.argv[2]
     spec_text = subprocess.run(
-        ["pdftotext", "-layout", pdf_path, "-"], capture_output=True, text=True, check=True
+        ["pdftotext", "-layout", pdf_path, "-"], capture_output=True, text=True, encoding="utf-8", check=True
     ).stdout
     guidance = guidance_by_section(spec_text)
-    with open(out_path, "w") as out_file:
+    with open(out_path, "w", encoding="utf-8") as out_file:
         json.dump(guidance, out_file, indent=1, ensure_ascii=False)
         out_file.write("\n")
     print(f"{len(guidance)} sections with guidance")

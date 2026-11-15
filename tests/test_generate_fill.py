@@ -1,11 +1,9 @@
 import json
 import subprocess
-import sys
 import unittest
-from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.generate.client import ClaudeCliClient, LlmError, make_client, parse_cli_output
 from converter.generate.fill import generate_missing, missing_sections

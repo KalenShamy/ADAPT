@@ -3,12 +3,12 @@
 import json
 from collections.abc import Iterator
 
+from converter.model import JsonObject
 from converter.generate.client import LlmClient, LlmError
-from converter.generate.fill import now_iso
+from converter.generate.fill import log_llm_step
 from converter.generate.prompts import parse_response
 from converter.place import SOURCE_TABLE_CAPTION, captioned_tables, is_table_block
 
-type JsonObject = dict[str, object]
 
 SCRIPT_NAME = "converter.generate.table_titles"
 MAX_SAMPLE_ROWS = 3
@@ -46,14 +46,8 @@ def title_untitled_tables(protocol: JsonObject, client: LlmClient) -> None:
             if title:
                 table["title"] = title
                 titled += 1
-    log = protocol.setdefault("processing_log", [])
-    assert isinstance(log, list)
-    log.append({
-        "step": "title_tables",
-        "actor": {"kind": "llm", "name": SCRIPT_NAME, "model": client.model},
-        "at": now_iso(),
-        "summary": f"titled {titled} of {len(tables)} uncaptioned table(s)",
-    })
+    log_llm_step(protocol, "title_tables", SCRIPT_NAME, client.model,
+                 f"titled {titled} of {len(tables)} uncaptioned table(s)")
 
 
 def untitled_tables(protocol: JsonObject) -> list[tuple[JsonObject, str, str]]:

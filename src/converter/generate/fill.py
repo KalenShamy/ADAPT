@@ -3,20 +3,19 @@
 import copy
 import json
 from collections.abc import Callable, Iterator
-from datetime import datetime, timezone
 
+from converter.model import JsonObject, now_iso
 from converter.generate.client import LlmClient, LlmError
 from converter.generate.context import SourceIndex, section_context
 from converter.generate.guidance import format_lines, section_format, style_example
-from converter.generate.prompts import CONFIDENCE_LEVELS, MAX_DRAFT_WORDS, build_prompt, parse_response
+from converter.generate.prompts import MAX_DRAFT_WORDS, build_prompt, parse_response
+from converter.protocol_fields import CONFIDENCE_LEVELS, LOW_CONFIDENCE, NO_BASIS_CONFIDENCE
 
-type JsonObject = dict[str, object]
 type DocumentValidator = Callable[[JsonObject], list[str]]
 
 MAX_ATTEMPTS = 2
 NO_BASIS = "no_basis"  # the model found nothing in the source to infer the section from
 GENERATED_STATUSES = ("populated", "not_applicable", NO_BASIS)
-NO_BASIS_CONFIDENCE = "none"
 SCRIPT_NAME = "converter.generate.fill"
 
 
@@ -26,11 +25,6 @@ def walk_keyed_sections(sections: dict[str, JsonObject]) -> Iterator[tuple[str, 
         children = section.get("subsections")
         if isinstance(children, dict):
             yield from walk_keyed_sections(children)
-
-
-def walk_sections(sections: dict[str, JsonObject]) -> Iterator[JsonObject]:
-    for _, section in walk_keyed_sections(sections):
-        yield section
 
 
 def allowed_statuses(schema: JsonObject, key: str) -> list[str]:
@@ -64,8 +58,15 @@ def populated_subsections(section: JsonObject) -> list[JsonObject]:
     return [child for child in children if child.get("status") == "populated"]
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def count_and_names(names: list[str]) -> str:
+    return f"{len(names)}: {', '.join(names) or 'none'}"
+
+
+def log_llm_step(protocol: JsonObject, step: str, script_name: str, model: str, summary: str) -> None:
+    log = protocol.setdefault("processing_log", [])
+    assert isinstance(log, list)
+    log.append({"step": step, "actor": {"kind": "llm", "name": script_name, "model": model},
+                "at": now_iso(), "summary": summary})
 
 
 def llm_custody(client: LlmClient, confidence: str) -> JsonObject:
@@ -82,9 +83,9 @@ def apply_draft(section: JsonObject, draft: JsonObject, client: LlmClient) -> No
     status = draft.get("status")
     if status not in GENERATED_STATUSES:
         raise ValueError(f"bad status {status!r}")
-    confidence = draft.get("confidence", "low")
+    confidence = draft.get("confidence", LOW_CONFIDENCE)
     if confidence not in CONFIDENCE_LEVELS:
-        confidence = "low"
+        confidence = LOW_CONFIDENCE
     paragraphs = draft.get("paragraphs", [])
     if status == "populated" and not (isinstance(paragraphs, list) and paragraphs and all(isinstance(p, str) and p.strip() for p in paragraphs)):
         raise ValueError("populated draft has no paragraphs")
@@ -126,16 +127,9 @@ def generate_missing(
             no_basis.append(number)
         else:
             filled.append(number)
-    log = result.setdefault("processing_log", [])
-    assert isinstance(log, list)
-    log.append({
-        "step": "generate_missing_sections",
-        "actor": {"kind": "llm", "name": SCRIPT_NAME, "model": client.model},
-        "at": now_iso(),
-        "summary": f"drafted {len(filled)} section(s): {', '.join(filled) or 'none'}; "
-                   f"no basis {len(no_basis)}: {', '.join(no_basis) or 'none'}; "
-                   f"failed {len(failed)}: {', '.join(failed) or 'none'}",
-    })
+    log_llm_step(result, "generate_missing_sections", SCRIPT_NAME, client.model,
+                 f"drafted {len(filled)} section(s): {', '.join(filled) or 'none'}; "
+                 f"no basis {count_and_names(no_basis)}; failed {count_and_names(failed)}")
     return result
 
 

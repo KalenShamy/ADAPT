@@ -8,6 +8,7 @@ next page is emitted again on that page (marked data-continued) so every page ma
 import html
 import re
 import sys
+from pathlib import Path
 
 import pymupdf
 
@@ -17,6 +18,23 @@ LINE_GAP_FACTOR = 0.6  # a vertical gap above this x font size starts a new para
 HEADING_SIZE_STEP = {16: "h1", 13: "h2", 11.5: "h3"}  # minimum font size -> heading tag
 BULLETS = ("•", "·", "§", "\uf0b7", "\uf0a7")  # \uf0b7 and \uf0a7 are Symbol-font bullets
 LEADER_DOTS = re.compile(r"\.{5,}")  # table-of-contents entries
+HEADING_SIZE_MARGIN = 1  # a heading is at least this much larger than body text
+MIN_LINE_OVERLAP = 0.5  # share of a line's area that must lie in a table to count as table text
+SAME_ROW_TOLERANCE = 8  # blocks whose tops fall in the same band of this height read left to right
+TABLE_GAP_HEIGHT = 8  # a blank table row taller than this separates two tables; shorter ones are spacing
+MIN_BORDER_LINES = 2  # a real table has drawn rules; one cut by a page break may show only two
+BORDER_THICKNESS = 2
+BORDER_MARGIN = 12  # the detected bbox can sit inside the drawn border
+BORDER_MIN_LENGTH = 20
+SEPARATE_LINE_SLACK = 40  # a line ending this far short of the cell's right edge was not wrapped
+PAGE_TOP_ZONE = 90  # a table starting this close to the page top may continue the previous page's table
+PAGE_BOTTOM_ZONE = 110  # a table ending this close to the page bottom may continue onto the next page
+PAGE_STYLE = (
+    "body{font:14px/1.4 sans-serif;max-width:1000px;margin:2em auto}"
+    "section{border-top:2px solid #444;margin-top:2em}"
+    "table{border-collapse:collapse;width:100%;margin:1em 0}"
+    "td{border:1px solid #888;padding:4px;vertical-align:top}"
+)
 
 
 def span_html(span: dict) -> str:
@@ -44,21 +62,12 @@ def heading_tag(line: dict, body_size: float) -> str | None:
     size = max(span["size"] for span in line["spans"])
     text = "".join(span["text"] for span in line["spans"]).strip()
     all_bold = all(span["flags"] & BOLD_FLAG or "bold" in span["font"].lower() for span in line["spans"] if span["text"].strip())
-    if not text or size < body_size + 1 or not all_bold:
+    if not text or size < body_size + HEADING_SIZE_MARGIN or not all_bold:
         return None
     for minimum, tag in sorted(HEADING_SIZE_STEP.items(), reverse=True):
         if size >= minimum:
             return tag
     return "h4"
-
-
-SAME_ROW_TOLERANCE = 8  # blocks whose tops fall in the same band of this height read left to right
-TABLE_GAP_HEIGHT = 8  # a blank table row taller than this separates two tables; shorter ones are spacing
-MIN_BORDER_LINES = 2  # a real table has drawn rules; one cut by a page break may show only two
-BORDER_THICKNESS = 2
-BORDER_MARGIN = 12  # the detected bbox can sit inside the drawn border
-BORDER_MIN_LENGTH = 20
-SEPARATE_LINE_SLACK = 40  # a line ending this far short of the cell's right edge was not wrapped
 
 
 def cell_lines(page: pymupdf.Page, bbox) -> list[tuple[str, bool]]:
@@ -82,7 +91,7 @@ def join_lines(lines: list[tuple[str, bool]]) -> str:
         text += markup
         if index < len(lines) - 1:
             text += " " if wrapped else "<br>"
-    return " ".join(merge_adjacent(text).split(" ")).replace("  ", " ")
+    return merge_adjacent(text).replace("  ", " ")
 
 
 def border_line_count(page: pymupdf.Page, table) -> int:
@@ -143,6 +152,7 @@ def tables_html(page: pymupdf.Page, table, continued: bool) -> list[tuple[tuple[
         body = "\n".join(
             "<tr>" + "".join(f"<td>{join_lines(cell)}</td>" for cell in row) + "</tr>" for row in group
         )
+        # index breaks the tie so tables from one split keep their order
         result.append(((table.bbox[1] + index, table.bbox[0]), f"<table{flag}>\n{body}\n</table>"))
     return result
 
@@ -158,6 +168,10 @@ def body_font_size(doc: pymupdf.Document) -> float:
     return max(counts, key=counts.get)
 
 
+def paragraph_html(tag: str, lines: list[str]) -> str:
+    return f"<{tag}>{' '.join(lines)}</{tag}>"
+
+
 def text_blocks_outside(page: pymupdf.Page, table_boxes: list, body_size: float) -> list[tuple[tuple[float, float], str]]:
     """((y, x) position, html) for each paragraph or heading not inside a table."""
     items: list[tuple[tuple[float, float], str]] = []
@@ -167,7 +181,7 @@ def text_blocks_outside(page: pymupdf.Page, table_boxes: list, body_size: float)
         lines = [
             line
             for line in block["lines"]
-            if not any(pymupdf.Rect(line["bbox"]).intersects(box) and _mostly_inside(line["bbox"], box) for box in table_boxes)
+            if not any(_mostly_inside(line["bbox"], box) for box in table_boxes)
         ]
         previous_bottom = None
         current: list[str] = []
@@ -187,7 +201,7 @@ def text_blocks_outside(page: pymupdf.Page, table_boxes: list, body_size: float)
                 or LEADER_DOTS.search(current[-1])
             )
             if starts_new:
-                items.append((current_pos, f"<{current_tag}>{' '.join(current)}</{current_tag}>"))
+                items.append((current_pos, paragraph_html(current_tag, current)))
                 current = []
             if not current:
                 current_pos = (line["bbox"][1], line["bbox"][0])
@@ -195,14 +209,14 @@ def text_blocks_outside(page: pymupdf.Page, table_boxes: list, body_size: float)
             current.append(markup.strip())
             previous_bottom = line["bbox"][3]
         if current:
-            items.append((current_pos, f"<{current_tag}>{' '.join(current)}</{current_tag}>"))
+            items.append((current_pos, paragraph_html(current_tag, current)))
     return items
 
 
 def _mostly_inside(line_bbox, box) -> bool:
     overlap = pymupdf.Rect(line_bbox) & box
     area = pymupdf.Rect(line_bbox).get_area()
-    return area > 0 and overlap.get_area() / area > 0.5
+    return area > 0 and overlap.get_area() / area > MIN_LINE_OVERLAP
 
 
 def convert(pdf_path: str, title: str) -> str:
@@ -215,24 +229,19 @@ def convert(pdf_path: str, title: str) -> str:
         boxes = [pymupdf.Rect(table.bbox) for table in tables]
         items = text_blocks_outside(page, boxes, body_size)
         for index, table in enumerate(tables):
-            continued = index == 0 and previous_table_open and table.bbox[1] < page.rect.y0 + 90
+            continued = index == 0 and previous_table_open and table.bbox[1] < page.rect.y0 + PAGE_TOP_ZONE
             items.extend(tables_html(page, table, continued))
         items.sort(key=lambda item: (round(item[0][0] / SAME_ROW_TOLERANCE), item[0][1]))
         last_table_bottom = max((table.bbox[3] for table in tables), default=0)
-        previous_table_open = bool(tables) and last_table_bottom > page.rect.y1 - 110
+        previous_table_open = bool(tables) and last_table_bottom > page.rect.y1 - PAGE_BOTTOM_ZONE
         body = "\n".join(markup for _, markup in items)
         sections.append(f'<section id="p{page.number + 1}"><h6>Page {page.number + 1}</h6>\n{body}\n</section>')
-    style = (
-        "body{font:14px/1.4 sans-serif;max-width:1000px;margin:2em auto}"
-        "section{border-top:2px solid #444;margin-top:2em}"
-        "table{border-collapse:collapse;width:100%;margin:1em 0}"
-        "td{border:1px solid #888;padding:4px;vertical-align:top}"
-    )
-    head = f"<!doctype html><html lang=en><head><meta charset=utf-8><title>{html.escape(title)}</title>\n<style>{style}</style></head><body>"
+    head = f"<!doctype html><html lang=en><head><meta charset=utf-8><title>{html.escape(title)}</title>\n<style>{PAGE_STYLE}</style></head><body>"
     return head + "\n" + "\n\n".join(sections) + "\n</body></html>\n"
 
 
 if __name__ == "__main__":
-    pdf_path, out_path, title = sys.argv[1:4]
-    with open(out_path, "w", encoding="utf-8") as out_file:
-        out_file.write(convert(pdf_path, title))
+    if len(sys.argv) != 4:
+        raise SystemExit(__doc__)
+    pdf_path, out_path, title = sys.argv[1:]
+    Path(out_path).write_text(convert(pdf_path, title), encoding="utf-8")

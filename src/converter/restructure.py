@@ -11,12 +11,13 @@ from dataclasses import dataclass, field
 
 import docx
 
-from pdf_to_cpt_docx import (
-    MISSING_HEADING_TITLE, REDACTION_MARK, STYLE_NAMES, FrontHeading, Heading, PageMark, Paragraph, Span,
-    Subheading, advance,
+from converter.model import (
+    MISSING_HEADING_TITLE, REDACTED_TITLES, STYLE_NAMES, FrontHeading, Heading, PageMark, Paragraph, Span, Subheading,
+    advance,
 )
-from section_splitters import handling_child_target, split_assignment, split_handling
-from special_sections import split_objectives, split_synopsis
+from converter.cross_references import APPENDIX_CHAPTER
+from converter.section_splitters import handling_child_target, split_assignment, split_handling
+from converter.special_sections import split_objectives, split_synopsis
 
 NO_CONTENT_PLACEHOLDER = "[No corresponding content in source protocol]"
 
@@ -25,16 +26,16 @@ TITLE_ONLY_MIN_SIMILARITY = 0.6
 MOVED_SECTION_MIN_SIMILARITY = 1.0  # same words: a moved section must keep its exact title
 MIN_PLURAL_WORD_LENGTH = 3  # shorter words ending in s ("gas", "its") aren't plurals
 MIN_ACRONYM_LENGTH = 3
-UNREADABLE_TITLES = {MISSING_HEADING_TITLE, REDACTION_MARK, "[REDACTED]"}
+UNREADABLE_TITLES = {MISSING_HEADING_TITLE, *REDACTED_TITLES}
 STOP_WORDS = {"a", "an", "and", "or", "of", "the", "for", "to", "in", "on", "with", "by", "at", "from", "after", "as"}
 APPENDIX_PREFIX = re.compile(r"^\s*appendix\s+\w+\s*[:.\-–]?\s*", re.IGNORECASE)
 APPENDIX_LABEL = re.compile(r"^\s*appendix\s+(?:\d+|[A-Z])\b\s*[:.\-–]?\s*(?=\S)", re.IGNORECASE)
 BRACKETED_TEXT = re.compile(r"\[[^\]]*\]")
 TEMPLATE_TYPED_NUMBER = re.compile(r"^\s*\d+(\.\d+)*\s+")
-TEMPLATE_HEADING_STYLES = ["01Heading 1", "02Heading 2", "03Heading 3", "04Heading 4"]
+TEMPLATE_HEADING_LEVELS = 4  # the template outline stops at heading 4
+TEMPLATE_HEADING_STYLES = STYLE_NAMES["v011"]["headings"][:TEMPLATE_HEADING_LEVELS]
 ALTERNATE_TITLE_SEPARATOR = " ~ "
 
-APPENDIX_CHAPTER = "10"  # v010 chapter whose L2 sections sponsors renumber and reorder
 SUPPORTING_DETAILS_NODE = "12"  # v011 "Appendix: Supporting Details"
 SYNOPSIS_ROW = "1.1"
 SYNOPSIS_OBJECTIVES_NODE = "1.1.1"
@@ -59,7 +60,6 @@ AMENDMENT_FRONT_HEADING = re.compile(
     re.IGNORECASE,
 )
 MAX_HEADING_LEVEL = len(STYLE_NAMES["v011"]["headings"])  # the template has no heading style below this
-SPLITTERS = {HANDLING_ROW: "place_handling", ASSIGNMENT_ROW: "place_assignment"}
 TEMPLATE_DROPPABLE_LEVEL = 3  # template headings at this level and deeper are emitted only with content
 # Words every protocol uses in section titles; they can't tell two template sections apart
 GENERIC_TITLE_WORDS = {"trial", "study", "investigational", "noninvestigational", "intervention", "treatment",
@@ -367,7 +367,7 @@ class Placer:
         if not words or near_number is None:
             return None
         chapter = near_number.split(".")[0]
-        matches = []
+        candidates = []
         for number, node in self.nodes.items():
             if not (number.startswith(chapter + ".") and node.level >= TEMPLATE_DROPPABLE_LEVEL):
                 continue
@@ -375,8 +375,8 @@ class Placer:
                 continue  # filled already, or a repeating "[#]" heading that the crosswalk and splitters fill
             template_words = distinguishing_words(resolve_template_title(node))
             if template_words and (template_words <= words or words <= template_words):
-                matches.append(node)
-        return matches[0] if len(matches) == 1 else None
+                candidates.append(node)
+        return candidates[0] if len(candidates) == 1 else None
 
     def place_unmatched(self, section, parent):
         """Put a section with no crosswalk row under the template section its title names, else as an extra heading."""
@@ -415,9 +415,13 @@ class Placer:
         if row.number == OBJECTIVES_ROW:
             self.place_objectives(section, target)
             return
-        if row.number in SPLITTERS:
+        if row.number == HANDLING_ROW:
             self.primary_nodes[section.number] = target
-            getattr(self, SPLITTERS[row.number])(section, target)
+            self.place_handling(section, target)
+            return
+        if row.number == ASSIGNMENT_ROW:
+            self.primary_nodes[section.number] = target
+            self.place_assignment(section, target)
             return
         if row.number == SYNOPSIS_ROW:
             self.place_synopsis(section, target)
@@ -619,26 +623,43 @@ def restructure(doc, crosswalk, outline):
     for root in nodes:
         prune_tree(root)
 
+    placeholder_nodes = add_placeholders(nodes)
+    number_nodes(nodes)
+
+    for node in placeholder_nodes:
+        report.placeholders.append(f"{node.number} {node.title}")
+    report.unmatched.extend(unmatched_report_lines(placer, tree))
+
+    landscape_pages = {block.page: block.landscape for block in doc.body if isinstance(block, PageMark)}
+    return Result(nodes, front, amendment_details, build_number_map(nodes, placer.primary_nodes),
+                  placer.also_sources, landscape_pages, report)
+
+
+def add_placeholders(nodes):
+    """Give each empty node that must stay in the outline a placeholder paragraph; returns those nodes."""
     placeholder_nodes = [node for node in iter_nodes(nodes)
                          if node.from_template and (node.level < TEMPLATE_DROPPABLE_LEVEL or node.required)
                          and not node.blocks and not node.children]
     for node in placeholder_nodes:
         node.blocks.append(placeholder_paragraph())
-    number_nodes(nodes)
+    return placeholder_nodes
 
-    for node in placeholder_nodes:
-        report.placeholders.append(f"{node.number} {node.title}")
+
+def unmatched_report_lines(placer, tree):
+    matched_numbers = {source.number for source in iter_nodes(tree) if placer.matches.get(id(source))}
+    lines = []
     for section, node in placer.unmatched:
-        parent = parent_number(section.number)
-        matched_parent = any(source.number == parent and placer.matches.get(id(source))
-                             for source in iter_nodes(tree))
-        placement = "no crosswalk row, kept under matched parent" if matched_parent else "no parent matched; retained as extra heading"
-        report.unmatched.append(f"{section.number} {section.title} -> {node.number} ({placement})")
+        if parent_number(section.number) in matched_numbers:
+            placement = "no crosswalk row, kept under matched parent"
+        else:
+            placement = "no parent matched; retained as extra heading"
+        lines.append(f"{section.number} {section.title} -> {node.number} ({placement})")
+    return lines
 
-    number_map = {source: node.number for source, node in placer.primary_nodes.items() if node.number}
+
+def build_number_map(nodes, primary_nodes):
+    number_map = {source: node.number for source, node in primary_nodes.items() if node.number}
     for node in iter_nodes(nodes):
         for source_number in node.source_numbers:
             number_map.setdefault(source_number, node.number)
-
-    landscape_pages = {block.page: block.landscape for block in doc.body if isinstance(block, PageMark)}
-    return Result(nodes, front, amendment_details, number_map, placer.also_sources, landscape_pages, report)
+    return number_map

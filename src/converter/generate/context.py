@@ -9,7 +9,6 @@ Every prompt used to get the whole protocol cut at a character limit. Instead, e
 Each chosen block records its tier and reason, so a reviewer can see why it was included.
 """
 
-import copy
 import json
 import math
 import re
@@ -18,14 +17,13 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
+from converter.model import JsonObject, merge_sources
+from converter.paths import DEFAULT_CROSSWALK, SCHEMA_DIR
 from converter.generate.guidance import REPEAT_PART, format_lines, section_format, template_key, template_sections
-from restructure import load_crosswalk
+from converter.restructure import load_crosswalk
 
-type JsonObject = dict[str, object]
 
-ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CROSSWALK = ROOT / "resources" / "research" / "crosswalk.tsv"
-ANNOTATED_SCHEMA = ROOT / "schema" / "protocol.schema.annotated.json"
+ANNOTATED_SCHEMA = SCHEMA_DIR / "protocol.schema.annotated.json"
 
 CONTEXT_CEILING_CHARS = 30000
 SYNOPSIS_MAX_CHARS = 6000
@@ -33,6 +31,8 @@ RELATED_MAX_CHARS = 12000
 SYNOPSIS_SECTION = "1.1"
 FRONT_LOCATION = "front"
 MAX_KEYWORD_HITS = 6
+PREVIEW_CHARS = 120
+RELATED = "related"  # budget group shared by every tier after OWN and SYNOPSIS
 MIN_KEYWORD_SCORE = 6.0  # BM25; lower scores were mostly a shared generic word ("laboratory", "sample")
 HEADING_OVERHEAD_CHARS = 5  # the "\n## " and line break around each heading
 NEIGHBOUR_BLOCKS = 1
@@ -59,15 +59,6 @@ def block_lines(blocks: list[JsonObject]) -> list[str]:
         elif block.get("text"):
             lines.append(block["text"])
     return lines
-
-
-def merge_sources(source_lists: list[list[JsonObject]]) -> list[JsonObject]:
-    merged: dict[str, JsonObject] = {}
-    for sources in source_lists:
-        for source in sources:
-            existing = merged.setdefault(source["section_id"], copy.deepcopy(source))
-            existing["source_indices"] = sorted(set(existing["source_indices"]) | set(source["source_indices"]))
-    return list(merged.values())
 
 
 def words(text: str) -> list[str]:
@@ -276,7 +267,7 @@ class SectionContext:
             "own_blocks_left_out": self.own_blocks_left_out,
             "picks": [{"tier": TIER_NAMES[pick.tier], "reason": pick.reason, "location": pick.unit.location,
                        "heading": pick.unit.heading, "chars": len(pick.unit.text),
-                       "preview": pick.unit.text[:120]} for pick in self.picks],
+                       "preview": pick.unit.text[:PREVIEW_CHARS]} for pick in self.picks],
         }
 
 
@@ -348,7 +339,7 @@ def candidates(index: SourceIndex, number: str, title: str, seeds: tuple[str, ..
 def section_context(index: SourceIndex, number: str, title: str = "", seeds: tuple[str, ...] = ()) -> SectionContext:
     picks = candidates(index, number, title, seeds)
     kept: list[Pick] = []
-    used = {OWN: 0, SYNOPSIS: 0, "related": 0}
+    used = {OWN: 0, SYNOPSIS: 0, RELATED: 0}
     own_left_out = 0
     for pick in picks:
         size = len(pick.unit.text) + len(pick.unit.heading) + HEADING_OVERHEAD_CHARS  # counts its heading as if new
@@ -361,8 +352,8 @@ def section_context(index: SourceIndex, number: str, title: str = "", seeds: tup
             fits = used[SYNOPSIS] + size <= SYNOPSIS_MAX_CHARS
             group = SYNOPSIS
         else:
-            fits = used["related"] + size <= RELATED_MAX_CHARS and total + size <= CONTEXT_CEILING_CHARS
-            group = "related"
+            fits = used[RELATED] + size <= RELATED_MAX_CHARS and total + size <= CONTEXT_CEILING_CHARS
+            group = RELATED
         if fits:
             used[group] += size
             kept.append(pick)

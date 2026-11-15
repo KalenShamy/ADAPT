@@ -1,11 +1,15 @@
 """What the rendered docx must contain, derived from the protocol JSON in render order."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from converter.render.docx import LEAD_INS, is_lead_in, is_title_field
+from converter.model import JsonObject, advance
+from converter.protocol_fields import LEAD_INS, is_lead_in
+from converter.render.docx import is_title_field
 from converter.render.renumber import displayed_numbers, natural_key, renumber_text
 
-type JsonObject = dict[str, object]
+
+PRE_LLM_SUFFIX = ".pre-llm"
 
 
 @dataclass
@@ -22,6 +26,12 @@ class Audit:
     outline: list[tuple[int, str, str]] = field(default_factory=list)
     blocks: list[Expectation] = field(default_factory=list)
     figures: int = 0
+
+
+def protocol_json_path(docx_path: Path) -> Path:
+    if docx_path.stem.endswith(PRE_LLM_SUFFIX):
+        return docx_path.with_name(docx_path.stem.removesuffix(PRE_LLM_SUFFIX) + ".json")
+    return docx_path.with_name(docx_path.stem + ".generated.json")
 
 
 def squash(text: str) -> str:
@@ -49,7 +59,7 @@ def add_section(audit: Audit, counters: list[int], section: JsonObject, level: i
     if section["status"] == "omitted":
         return
     number = str(section.get("number") or "")
-    add_heading(audit, counters, level, str(section["title"]))
+    audit.outline.append((level, advance(counters, level), str(section["title"])))
     content = section.get("content", [])
     if number in LEAD_INS and content and is_lead_in(content[0]):
         content = content[1:]
@@ -62,18 +72,10 @@ def add_section(audit: Audit, counters: list[int], section: JsonObject, level: i
 
 
 def add_additional(audit: Audit, counters: list[int], node: JsonObject, level: int, parent_number: str) -> None:
-    add_heading(audit, counters, level, str(node["title"]))
+    audit.outline.append((level, advance(counters, level), str(node["title"])))
     add_blocks(audit, node["content"], f"additional subsection {node['title']!r} under {parent_number}")
     for child in node["subsections"]:
         add_additional(audit, counters, child, level + 1, parent_number)
-
-
-def add_heading(audit: Audit, counters: list[int], level: int, title: str) -> None:
-    del counters[level:]
-    while len(counters) < level:
-        counters.append(0)
-    counters[-1] += 1
-    audit.outline.append((level, ".".join(map(str, counters)), title))
 
 
 def add_blocks(audit: Audit, blocks: list[JsonObject], where: str) -> None:

@@ -1,10 +1,9 @@
 import io
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from unittest.mock import patch
 
@@ -14,16 +13,14 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.opc.packuri import PackURI
 from docx.opc.part import Part
 from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls, qn
+from docx.oxml.ns import nsdecls
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import docx_coverage
 from converter.extract import docx as reader_module
 from converter.extract.docx import PNG_SIGNATURE, load_docx, read_docx
-from pdf_to_cpt_docx import (
-    Figure, FrontHeading, Heading, Paragraph, Subheading, Table, collect_title_values,
-)
+from converter.model import Figure, FrontHeading, Heading, Paragraph, Subheading, Table
+from converter.title_fields import collect_title_values
 
 SAMPLE = Path(__file__).resolve().parents[1] / "resources" / "example-protocols" / "v010" / "sampleV10inputV2.docx"
 CUSTOM_STYLES = (

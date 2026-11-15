@@ -1,11 +1,10 @@
 import copy
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 import docx
 from docx.enum.text import WD_COLOR_INDEX
@@ -14,7 +13,7 @@ from docx.oxml.ns import qn
 from converter.cli import DEFAULT_TEMPLATE
 from converter.parts import tag_collection_parts
 from converter.place import Placer, move_intervention_tables, place_node
-from pdf_to_cpt_docx import Paragraph, Span
+from converter.model import Paragraph, Span
 from converter.render.docx import (
     AI_TABLE_FILL, LOW_CONFIDENCE_NOTE, LOW_CONFIDENCE_TEXT_COLOR, MISSING_TEXT, NO_BASIS_NOTE, UNPLACED_APPENDIX_TITLE, DocxRenderer,
     label_text, participants_sentence,

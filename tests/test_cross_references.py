@@ -1,12 +1,10 @@
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
-from cross_references import CrossReferenceReport, rewrite_heading_titles, rewrite_paragraph, rewrite_title_values
-from pdf_to_cpt_docx import Paragraph, Span
-from restructure import add_extra_node, OutNode, Section
+from converter.cross_references import CrossReferenceReport, rewrite_heading_titles, rewrite_paragraph, rewrite_title_values
+from converter.model import Paragraph, Span
+from converter.restructure import add_extra_node, OutNode, Section
 
 
 def paragraph(text):

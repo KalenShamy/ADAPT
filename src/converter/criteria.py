@@ -3,7 +3,7 @@
 import copy
 import re
 
-type JsonObject = dict[str, object]
+from converter.model import JsonObject, merge_sources
 
 CRITERIA_SECTIONS = ("5.2", "5.3")
 NUMBERED_CRITERION = re.compile(r"^\s*(\d+)[.)]\s+(?P<text>\S.*)$", re.DOTALL)
@@ -51,18 +51,9 @@ def criterion_text(blocks: list[JsonObject]) -> str:
     return "\n".join([first, *(block["text"].strip() for block in blocks[1:] if block["type"] == "paragraph")])
 
 
-def merge_sources(blocks: list[JsonObject]) -> list[JsonObject]:
-    merged: dict[str, JsonObject] = {}
-    for block in blocks:
-        for source in block["custody"]["v10_sources"]:
-            existing = merged.setdefault(source["section_id"], copy.deepcopy(source))
-            existing["source_indices"] = sorted(set(existing["source_indices"]) | set(source["source_indices"]))
-    return list(merged.values())
-
-
 def criterion_item(number: int, blocks: list[JsonObject]) -> JsonObject:
     custody = copy.deepcopy(blocks[0]["custody"])
-    custody["v10_sources"] = merge_sources(blocks)
+    custody["v10_sources"] = merge_sources(block["custody"]["v10_sources"] for block in blocks)
     return {"number": number, "text": {"value": criterion_text(blocks), "status": "filled", "custody": custody}}
 
 

@@ -6,7 +6,6 @@ index of the Word section it sits in.
 """
 
 import difflib
-import logging
 import math
 import re
 from collections import Counter
@@ -21,15 +20,16 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 from lxml.etree import _Element
 
-from pdf_to_cpt_docx import (
-    CAPTION, COVER_HEADING, DEFAULT_CELL_PADDING, DEFAULT_TABLE_FONT_SIZE, FRONT_MATTER_HEADINGS,
-    MAX_CAPTION_LENGTH, MISSING_HEADING_TITLE, SKIPPED_FRONT_MATTER, TOC_LEADER, Document, Figure, FrontHeading, Heading, PageMark,
-    Paragraph, Span, Subheading, Table, advance, canonical_label, merge_split_tables, split_at_labels, split_label, tidy_spans,
+from converter.extract.blocks import CAPTION, merge_split_tables
+from converter.extract.headings import FRONT_MATTER_HEADINGS, SKIPPED_FRONT_MATTER
+from converter.extract.pdf_reader import tidy_spans
+from converter.model import (
+    DEFAULT_CELL_PADDING, DEFAULT_TABLE_FONT_SIZE, MAX_CAPTION_LENGTH, MISSING_HEADING_TITLE, TOC_LEADER, TWIPS_PER_PT, Document,
+    Figure, FrontHeading, Heading, PageMark, Paragraph, Span, Subheading, Table, advance, cell_text,
 )
+from converter.paths import RESOURCES_DIR
+from converter.title_fields import COVER_HEADING, MAX_LABEL_LENGTH, split_at_labels, split_label
 
-log = logging.getLogger(__name__)
-
-TWIPS_PER_PT = 20
 ALIGNMENTS = {"center": "center", "right": "right", "end": "right"}
 EMU_PER_PT = 12700
 HALF_POINTS_PER_PT = 2
@@ -51,6 +51,22 @@ NOTE_KINDS = ("footnote", "endnote")
 NOTE_SEPARATOR_TYPES = ("separator", "continuationSeparator", "continuationNotice")
 NOTE_NUMBER_FORMATS = {"footnote": "decimal", "endnote": "lowerRoman"}  # Word's defaults
 FIGURE_MARKER = "[Figure]"
+SYMBOL_GLYPH_MASK = 0xFF  # symbol fonts keep their glyphs at 0xF0xx in the private-use area
+HEX_BASE = 16
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+V_NS = "urn:schemas-microsoft-com:vml"
+GREEK_LOWER = dict(zip("abcdefghijklmnopqrstuvwxyz", "αβχδεφγηιϕκλμνοπθρστυϖωξψζ"))
+GREEK_UPPER = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ"))
+GREEK_LETTERS = {**GREEK_LOWER, **GREEK_UPPER}
+SYMBOL_FONT_CHARS = {
+    0xA3: "≤", 0xB3: "≥", 0xB1: "±", 0xB0: "°", 0xB4: "×", 0xB8: "÷", 0xB9: "≠", 0xBB: "≈", 0xA5: "∞",
+    0xB5: "µ", 0xAE: "→", 0xAC: "←", 0xAD: "↑", 0xAF: "↓", 0xDE: "⇒", 0xDB: "⇔", 0xD6: "√", 0xB7: "•",
+    0xA2: "′", 0xB2: "″", 0xB6: "∂", 0xD1: "∇", 0xC5: "∅", 0xCE: "∈", 0xD0: "∠", 0xE5: "∑", 0xF2: "∫",
+    0x2D: "−", 0x2B: "+", 0x3D: "=", 0x3C: "<", 0x3E: ">", 0x20: " ",
+}
+WINGDINGS_CHARS = {0xFC: "✓", 0xFB: "✗", 0xA7: "▪", 0x6E: "■", 0x71: "❑", 0xD8: "➢", 0x76: "❖", 0xA8: "◻", 0xE0: "→"}
 
 # Style names are compared case-folded; the numbered ones come as "Heading 2" or "02Heading 2".
 NUMBERED_HEADING = re.compile(r"^(?:0\d\s?)?heading ([1-9])$")
@@ -62,7 +78,7 @@ GUIDANCE_STYLES = {"cpt_instructional"}
 PLACEHOLDER_ONLY = re.compile(r"^\[[^\]]*\]$")
 # Sponsors often type their own protocol text over the guidance and leave the style on, so a
 # CPT_Instructional paragraph is dropped only when the v010 template contains it.
-DEFAULT_TEMPLATE = Path(__file__).resolve().parents[3] / "resources" / "CPT_CoreBWE_v010.docx"
+DEFAULT_TEMPLATE = RESOURCES_DIR / "CPT_CoreBWE_v010.docx"
 GUIDANCE_MATCH_RATIO = 0.9  # difflib ratio at which a paragraph counts as the template's text
 MIN_GUIDANCE_WORDS = 3
 DROPPED_PREVIEW_LENGTH = 70
@@ -477,7 +493,8 @@ class Reader:
         for row in rows:
             row.extend(empty_cell() for _ in range(width - len(row)))
         if len(grid_cols) < width:
-            grid_cols += [sum(grid_cols) / max(len(grid_cols), 1) if grid_cols else TITLE_LABEL_COLUMN_PT] * (width - len(grid_cols))
+            fill_width = sum(grid_cols) / len(grid_cols) if grid_cols else TITLE_LABEL_COLUMN_PT
+            grid_cols += [fill_width] * (width - len(grid_cols))
         padding = table_padding(element)
         height = estimate_height(rows, grid_cols, padding)
         section = self.current_section()
@@ -595,18 +612,9 @@ class Reader:
                 doc.front.append(FrontHeading(title.title() if title.isupper() else title, self.section))
 
         for element in self.body_elements(self.document.element.body):
-            has_section_end = element.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None if local(element) == "p" else False
+            has_section_end = local(element) == "p" and element.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None
             if local(element) == "tbl":
-                table = self.table(element)
-                target = sink()
-                if table and target is not None:
-                    target.append(table)
-                    if region == "title":
-                        self.stats["title images"] += len(self.pending_figures)
-                    else:
-                        target.extend(self.pending_figures)
-                    target.extend(self.note_blocks(element))
-                self.pending_figures.clear()
+                self.add_table(element, region, sink())
                 continue
             style_id, style_name = self.paragraph_style(element)
             text = "".join(s.text for s in self.spans(element, [style_id])).strip()
@@ -625,9 +633,7 @@ class Reader:
                     landscape_seen = self.mark_page(doc, landscape_seen, force=landscape_seen is None)
             elif text and region != "body" and (FRONT_HEADING_STYLE.match(style_name) or style_name == PAGE_TITLE_STYLE
                                                 or self.looks_like_front_heading(element, text)):
-                if region == "title" and COVER_HEADING.match(text):
-                    pass
-                else:
+                if not (region == "title" and COVER_HEADING.match(text)):
                     start_front(text)
             elif text and region == "body" and FRONT_HEADING_STYLE.match(style_name):
                 doc.body.append(Subheading(text, "bold", self.section))
@@ -646,6 +652,17 @@ class Reader:
         if region == "title":
             finish_title()
         return doc
+
+    def add_table(self, element: _Element, region: str, target: list | None) -> None:
+        table = self.table(element)
+        if table and target is not None:
+            target.append(table)
+            if region == "title":
+                self.stats["title images"] += len(self.pending_figures)
+            else:
+                target.extend(self.pending_figures)
+            target.extend(self.note_blocks(element))
+        self.pending_figures.clear()
 
     def in_contents_list(self, element: _Element, style_name: str, text: str) -> bool:
         """A contents entry, including a wrapped one whose first line lost the TOC style and the leader."""
@@ -687,7 +704,7 @@ class Reader:
                 self.stats["title images"] += 1  # the PDF path keeps no title-page images either
             else:
                 target.append(figure)
-        if style_name == LABEL_STYLE and region == "body" and text and len(text) <= LABEL_MAX_LENGTH \
+        if style_name == LABEL_STYLE and region == "body" and text and len(text) <= MAX_LABEL_LENGTH \
                 and ":" not in text and not text.endswith((".", ";", ",")):
             target.append(Subheading(text, "label", self.section))
             return
@@ -695,8 +712,6 @@ class Reader:
         if paragraph:
             target.append(paragraph)
 
-
-LABEL_MAX_LENGTH = 80
 
 
 # ---------------------------------------------------------------- helpers
@@ -755,25 +770,12 @@ def field_code_text(root: _Element) -> set[_Element]:
 def symbol_char(element: _Element) -> str | None:
     """The character a w:sym stands for, or None when its font/code is not in the tables."""
     font = (attr(element, "font", "") or "").casefold()
-    code = int(attr(element, "char", "0") or "0", 16)
-    code &= 0xFF  # symbol fonts keep their glyphs at 0xF0xx in the private-use area
+    code = int(attr(element, "char", "0") or "0", HEX_BASE) & SYMBOL_GLYPH_MASK
     if font == "symbol":
         return SYMBOL_FONT_CHARS.get(code) or GREEK_LETTERS.get(chr(code))
     if font.startswith("wingdings"):
         return WINGDINGS_CHARS.get(code)
     return None
-
-
-GREEK_LOWER = dict(zip("abcdefghijklmnopqrstuvwxyz", "αβχδεφγηιϕκλμνοπθρστυϖωξψζ"))
-GREEK_UPPER = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ"))
-GREEK_LETTERS = {**GREEK_LOWER, **GREEK_UPPER}
-SYMBOL_FONT_CHARS = {
-    0xA3: "≤", 0xB3: "≥", 0xB1: "±", 0xB0: "°", 0xB4: "×", 0xB8: "÷", 0xB9: "≠", 0xBB: "≈", 0xA5: "∞",
-    0xB5: "µ", 0xAE: "→", 0xAC: "←", 0xAD: "↑", 0xAF: "↓", 0xDE: "⇒", 0xDB: "⇔", 0xD6: "√", 0xB7: "•",
-    0xA2: "′", 0xB2: "″", 0xB6: "∂", 0xD1: "∇", 0xC5: "∅", 0xCE: "∈", 0xD0: "∠", 0xE5: "∑", 0xF2: "∫",
-    0x2D: "−", 0x2B: "+", 0x3D: "=", 0x3C: "<", 0x3E: ">", 0x20: " ",
-}
-WINGDINGS_CHARS = {0xFC: "✓", 0xFB: "✗", 0xA7: "▪", 0x6E: "■", 0x71: "❑", 0xD8: "➢", 0x76: "❖", 0xA8: "◻", 0xE0: "→"}
 
 
 def in_math_superscript(run: _Element) -> bool:
@@ -851,12 +853,6 @@ def image_references(run: _Element) -> Iterator[tuple[str, float]]:
                 yield rel_id, 0.0
 
 
-A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
-R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-V_NS = "urn:schemas-microsoft-com:vml"
-
-
 def to_png(blob: bytes) -> bytes | None:
     if blob.startswith(PNG_SIGNATURE):
         return blob
@@ -876,10 +872,6 @@ def cell_of(text: str, bold: bool = False) -> dict:
     if text:
         cell["paragraphs"] = [Paragraph([Span(text, bold, False, False, DEFAULT_FONT_SIZE)])]
     return cell
-
-
-def cell_text(cell: dict | None) -> str:
-    return " ".join(p.text for p in cell["paragraphs"]).strip() if cell else ""
 
 
 def title_page_tables(items: list[Paragraph | Table], notes: list[str]) -> list[Table]:
@@ -958,15 +950,7 @@ def template_guidance(template: Path) -> frozenset[str]:
     return frozenset(texts)
 
 
-def read_docx(path: Path, template: Path = DEFAULT_TEMPLATE) -> tuple[Document, list[str]]:
-    """The Document plus notes about anything the reader could not carry over faithfully.
-
-    `template` is the v010 CPT template whose guidance text is dropped from the protocol.
-    """
-    reader = Reader(docx.Document(str(path)), template_guidance(template))
-    document = reader.read()
-    for part in ("front", "body"):
-        setattr(document, part, merge_split_tables(getattr(document, part), by_repeated_header=True))
+def add_report_notes(reader: Reader) -> None:
     for what, count in reader.dropped.items():
         reader.notes.append(f"dropped {count} {what}")
     for preview in reader.dropped_previews:
@@ -993,6 +977,18 @@ def read_docx(path: Path, template: Path = DEFAULT_TEMPLATE) -> tuple[Document, 
     if reader.unmapped_symbols:
         reader.notes.append("symbols without a known mapping kept as [symbol font U+code]: "
                             + ", ".join(sorted(reader.unmapped_symbols)))
+
+
+def read_docx(path: Path, template: Path = DEFAULT_TEMPLATE) -> tuple[Document, list[str]]:
+    """The Document plus notes about anything the reader could not carry over faithfully.
+
+    `template` is the v010 CPT template whose guidance text is dropped from the protocol.
+    """
+    reader = Reader(docx.Document(str(path)), template_guidance(template))
+    document = reader.read()
+    for part in ("front", "body"):
+        setattr(document, part, merge_split_tables(getattr(document, part), by_repeated_header=True))
+    add_report_notes(reader)
     document.notes = reader.notes
     document.unconverted_images = reader.unconverted_images
     return document, reader.notes

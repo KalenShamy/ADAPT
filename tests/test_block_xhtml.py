@@ -1,12 +1,11 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
-from block_xhtml import blocks_to_xhtml, xhtml_to_blocks
-from pdf_to_cpt_docx import Figure, FrontHeading, Heading, PageMark, Paragraph, Redaction, Span, Subheading, Table
+from converter.block_xhtml import blocks_to_xhtml, xhtml_to_blocks
+from converter.model import Figure, FrontHeading, Heading, PageMark, Paragraph, Redaction, Span, Subheading, Table
 
 
 class CodecTests(unittest.TestCase):

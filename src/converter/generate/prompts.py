@@ -2,8 +2,9 @@
 
 import json
 
+from converter.protocol_fields import CONFIDENCE_LEVELS
+
 MAX_DRAFT_WORDS = 250  # about half a single-spaced page
-CONFIDENCE_LEVELS = ("high", "medium", "low", "very_low")  # very_low: output the source gives no basis for
 
 INSTRUCTIONS = """\
 You are drafting one section of a clinical trial protocol in the TransCelerate CPT v011 / ICH M11 format.

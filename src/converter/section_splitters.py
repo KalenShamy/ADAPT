@@ -7,7 +7,7 @@
 import re
 from dataclasses import dataclass, field
 
-from pdf_to_cpt_docx import Paragraph
+from converter.model import Paragraph
 
 PREPARATION_NODE = "6.6.1"
 STORAGE_NODE = "6.6.2"

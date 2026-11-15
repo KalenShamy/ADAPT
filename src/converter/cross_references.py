@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass, field
 
-from pdf_to_cpt_docx import Paragraph, Span, Table
+from converter.model import Paragraph, Span, Table
 
 APPENDIX_CHAPTER = "10"  # v010 numbers its appendices 10.1, 10.2, ...; "Appendix 3" is section 10.3
 SNIPPET_CONTEXT = 40  # characters of text shown on each side of a reported reference

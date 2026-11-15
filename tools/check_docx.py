@@ -1,8 +1,9 @@
 """Look for structural problems that make Word refuse to open a .docx.
 
-Usage: python check_docx.py <file.docx> [<file.docx> ...]
+Usage: python tools/check_docx.py <file.docx> [<file.docx> ...]
 """
 
+import argparse
 import sys
 import zipfile
 from pathlib import Path
@@ -58,10 +59,13 @@ def check(docx_path: Path) -> list[str]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("files", nargs="+", type=Path)
+    args = parser.parse_args()
     found_problems = False
-    for argument in sys.argv[1:]:
-        problems = check(Path(argument))
-        print(f"{argument}: {'OK' if not problems else ''}")
+    for path in args.files:
+        problems = check(path)
+        print(f"{path}: {'OK' if not problems else ''}")
         for problem in problems:
             print(f"  {problem}")
         found_problems = found_problems or bool(problems)

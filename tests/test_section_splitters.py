@@ -1,14 +1,12 @@
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
-from pdf_to_cpt_docx import Document, Heading, Paragraph, Span
-from restructure import (
+from converter.model import Document, Heading, Paragraph, Span
+from converter.restructure import (
     MAX_HEADING_LEVEL, NO_CONTENT_PLACEHOLDER, iter_nodes, load_crosswalk, restructure, template_outline,
 )
-from section_splitters import (
+from converter.section_splitters import (
     ACCOUNTABILITY_NODE, ASSIGNMENT_NODE, PREPARATION_NODE, RANDOMIZATION_NODE, STORAGE_NODE,
     handling_child_target, split_assignment, split_handling,
 )

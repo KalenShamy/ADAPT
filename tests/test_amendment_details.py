@@ -1,26 +1,13 @@
-import json
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.generate.fields import AMENDMENT_DETAILS, extract_structured_fields, is_amendment, amendment_details_extraction, extract, section_at, section_code
+from helpers import FakeClient
 from converter.validate import load_schema, validate_document
 from minimal_instance_builder import minimal_instance  # noqa: E402  (schema/ is on the path via converter.validate)
 
 CODES = {"1.1.2 Overall Design": "C1", "5.2 Exclusion Criteria": "C2", "10.4 Analyses Associated with the Primary Objective(s)": "C3"}
-
-
-class FakeClient:
-    name = "fake"
-    model = "fake"
-
-    def __init__(self, answer):
-        self.answer = answer
-
-    def complete(self, prompt):
-        return json.dumps(self.answer)
 
 
 class RecordingClient:

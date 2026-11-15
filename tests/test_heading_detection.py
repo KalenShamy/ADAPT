@@ -1,16 +1,15 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import pymupdf
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.extract.pdf import numbered_bookmarks, same_heading_title, source_checks
-from pdf_to_cpt_docx import (
-    REDACTED_HEADING_TITLE, Document, Figure, Heading, PageMark, Row, Span, find_tables, skipped_numbers, structure,
-)
+from converter.extract.headings import skipped_numbers, structure
+from converter.extract.pdf_reader import find_tables
+from converter.model import REDACTED_HEADING_TITLE, Document, Figure, Heading, PageMark, Row, Span
 
 BODY_SIZE = 12.0
 HEADING_X = 72.0

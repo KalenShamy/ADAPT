@@ -1,18 +1,17 @@
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from docx.oxml.ns import qn
 
 from converter.cli import DEFAULT_TEMPLATE
 from converter.title_page import finish_title
-from pdf_to_cpt_docx import (
-    PageMark, Row, Span, Table, Writer, canonical_label, collect_title_values, structure, title_fields, write_title_page,
-)
+from converter.extract.headings import structure
+from converter.model import PageMark, Row, Span, Table
+from converter.render.writer import Writer, write_title_page
+from converter.title_fields import canonical_label, collect_title_values, title_fields
 
 BODY_SIZE = 12.0
 LABEL_X = 72.0
@@ -29,7 +28,7 @@ def collect_from_pairs(pairs):
     """collect_title_values over title-page [label, value] pairs, bypassing PDF row layout."""
     document = SimpleNamespace(title_rows=[], title_tables=[])
     notes = []
-    with patch("pdf_to_cpt_docx.title_fields", return_value=pairs):
+    with patch("converter.title_fields.title_fields", return_value=pairs):
         values, others = collect_title_values(document, notes)
     return values, others, notes
 

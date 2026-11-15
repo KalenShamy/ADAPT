@@ -1,10 +1,8 @@
 import json
-import sys
 import unittest
 from unittest import mock
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.generate.fields import extract_objectives, extract_analyses, fill_summary_rows, section_at
 from converter.validate import load_schema, validate_document

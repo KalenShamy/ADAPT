@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def validate(docx: Path) -> Validation:
     most rules crash on that. Outside UTF-8 mode this runs the check in a UTF-8 child process.
     """
     if not sys.flags.utf8_mode:
-        return validate_in_utf8_process(docx)
+        return validate_in_utf8_process(Path(__file__), docx)
 
     from simple_error_log import Errors
     from usdm4_protocol.validation.m11 import M11Validator
@@ -108,12 +109,19 @@ def validate(docx: Path) -> Validation:
     if results.count() == 0:
         raise ValidatorFailed(f"The validator could not read {docx.name}.\n{log.dump().strip() or 'No rules ran.'}")
 
+    return Validation(tuple(rule_results(results.outcomes, finding_from)))
+
+
+def rule_results(outcomes: dict, finding_from: Callable[[dict], Finding]) -> list[RuleResult]:
+    """One RuleResult per rule outcome, ordered by rule id."""
+    from simple_error_log import Errors
+
     rules = []
-    for rule_id, outcome in sorted(results.outcomes.items()):
+    for rule_id, outcome in sorted(outcomes.items()):
         findings = tuple(finding_from(row) for row in outcome.errors.to_dict(level=Errors.DEBUG))
         reason = (outcome.exception or "").strip().splitlines()
         rules.append(RuleResult(rule_id, outcome.status.value, findings, reason[0] if reason else ""))
-    return Validation(tuple(rules))
+    return rules
 
 
 def finding_from(row: dict) -> Finding:
@@ -126,10 +134,11 @@ def finding_from(row: dict) -> Finding:
     )
 
 
-def validate_in_utf8_process(docx: Path) -> Validation:
+def validate_in_utf8_process(script: Path, docx: Path) -> Validation:
+    """Run script (a validator with this command line) on docx in UTF-8 mode and read back its JSON."""
     with tempfile.TemporaryDirectory() as out_dir:
         json_path = Path(out_dir) / "validation.json"
-        command = [sys.executable, "-X", "utf8", __file__, str(docx), "--json", str(json_path)]
+        command = [sys.executable, "-X", "utf8", str(script), str(docx), "--json", str(json_path)]
         completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
         if not json_path.is_file():
             raise ValidatorFailed(completed.stderr.strip() or f"validator exited with code {completed.returncode}")
@@ -154,8 +163,9 @@ def format_report(name: str, validation: Validation) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate an ICH M11 protocol .docx")
+def run_command_line(description: str, validate_docx: Callable[[Path], Validation]) -> int:
+    """The command line shared by the validators: print the report, optionally save JSON, return the exit code."""
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("file", type=Path)
     parser.add_argument("--json", type=Path, help="also write the per-rule results to this JSON file")
     args = parser.parse_args()
@@ -164,7 +174,7 @@ def main() -> int:
         print(f"Not a .docx file: {args.file}", file=sys.stderr)
         return EXIT_NOT_RUN
     try:
-        validation = validate(args.file)
+        validation = validate_docx(args.file)
     except ValidatorFailed as error:
         print(error, file=sys.stderr)
         return EXIT_NOT_RUN
@@ -176,4 +186,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_command_line("Validate an ICH M11 protocol .docx", validate))

@@ -1,4 +1,4 @@
-"""NCI Thesaurus lookups from the flat file `Thesaurus.txt` (see src/fetch_terminology.py).
+"""NCI Thesaurus lookups from the flat file `Thesaurus.txt` (see tools/fetch_terminology.py).
 
 One tab-separated row per concept: code, url, parents, synonyms (|-separated, the first is the
 preferred name), definition, display name, status, semantic type, subsets.
@@ -7,9 +7,10 @@ preferred name), definition, display name, status, semantic type, subsets.
 from collections import defaultdict
 from pathlib import Path
 
+from converter.paths import RESOURCES_DIR
 from converter.terminology import Term, normalize
 
-NCIT_FILE = Path(__file__).resolve().parents[3] / "resources" / "terminology" / "Thesaurus.txt"
+NCIT_FILE = RESOURCES_DIR / "terminology" / "Thesaurus.txt"
 CODE_COLUMN, SYNONYMS_COLUMN, SEMANTIC_TYPE_COLUMN, SUBSETS_COLUMN = 0, 3, 7, 8
 LIST_SEPARATOR = "|"
 

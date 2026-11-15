@@ -1,9 +1,8 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.generate.fields import Context, build_slot
 from converter.terminology import Term, TermRegistry

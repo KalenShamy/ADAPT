@@ -1,8 +1,7 @@
-import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.cli import DEFAULT_TEMPLATE
 from converter.render.docx import UNSPLIT_TEXT, DocxRenderer

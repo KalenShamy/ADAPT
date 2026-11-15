@@ -7,12 +7,13 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_to_cpt_docx import (
-    COVER_HEADING, ELECTRONIC_SIGNATURE_VALUE, SAME_ROW_TOLERANCE, Heading, Paragraph, Table, canonical_label,
-    collect_title_values, join_sponsor, registry_rows,
+from converter.extract.pdf_reader import SAME_ROW_TOLERANCE
+from converter.model import Heading, JsonObject, Paragraph, Table
+from converter.protocol_fields import HIGH_CONFIDENCE, LOW_CONFIDENCE
+from converter.title_fields import (
+    COVER_HEADING, ELECTRONIC_SIGNATURE_VALUE, canonical_label, collect_title_values, join_sponsor, registry_rows,
 )
 
-type JsonObject = dict[str, object]
 
 TITLE_STOP = re.compile(r"^(Confidential:|Confidential$|Any and all information|This protocol was approved|Based on TMF|©)", re.IGNORECASE)
 RUNNING_HEADER_VERSION = re.compile(r"^Version number:\s*(\S+)$", re.IGNORECASE)
@@ -39,6 +40,10 @@ V10_FIELD_IDS = {
     "regulatory_ids": "regulatory_agency_identifier_numbers", "date": "approval_date",
     "signatory": "sponsor_signatory", "medical_monitor": "medical_monitor_name_and_contact_information",
 }
+
+
+def is_pdf(path) -> bool:
+    return Path(path).suffix.lower() == PDF_SUFFIX
 
 
 def parse_date(text: str) -> str | None:
@@ -106,37 +111,18 @@ def add_amendment_from_version(values: dict[str, str]) -> None:
         values["amendment_number"] = amendment.group()
 
 
+PROTOCOL_LABEL_LINE = re.compile(r"(?:AMENDED )?CLINICAL (?:TRIAL|STUDY) PROTOCOL(?: \d+)?", re.IGNORECASE)
+KEYS_NOT_COPIED_FROM_LABELS = ("registry_id", "regulatory_ids", "sponsor_address", "medical_monitor", "signatory",
+                               "primary_intervention")
 COMPANY_LINE = re.compile(r"[A-Z][\w&.,' -]*?(?:Pharmaceuticals|Therapeutics|Pharma|Biosciences)[\w., -]*"
                           r"(?:Inc\.|Ltd\.?|LLC|GmbH|Corp\.|Corporation|AG|plc|S\.A\.)")
 
 
-def enrich_title(path, values, others, notes):
-    """Supplement title fields from PDF page text. Other inputs have no page layout, so only the title table is used."""
-    if Path(path).suffix.lower() != PDF_SUFFIX:
-        add_amendment_from_version(values)
-        return
-    lines, second_page_lines = first_two_pages(path)
-    running_version = next((match.group(1) for match in map(RUNNING_HEADER_VERSION.match, second_page_lines) if match), None)
-    if running_version:
-        values.setdefault("version", running_version)
-        notes.append("Version Number taken from the 'Version number:' running header on page 2")
-    first_label = next((index for index, line in enumerate(lines)
-                        if re.fullmatch(r"(?:AMENDED )?CLINICAL (?:TRIAL|STUDY) PROTOCOL(?: \d+)?", line, re.IGNORECASE)), 0)
-    collected = {}
+def collect_labelled_lines(lines: list[str], start: int) -> dict[str, list[str]]:
+    """Lines under each recognised title-page label, from `start` until the confidentiality notice."""
+    collected: dict[str, list[str]] = {}
     current = None
-    registry = registry_rows(" ".join(lines))
-    date = next((line.partition(":")[2].strip() for line in lines[:first_label]
-                 if line.startswith("Date:")), None)
-    if date:
-        values["date"] = date
-    for line in lines[:first_label]:
-        version = re.fullmatch(r"Protocol Version (\S+) Final", line, re.IGNORECASE)
-        amendment = re.fullmatch(r"Protocol Amendment (\S+) Final", line, re.IGNORECASE)
-        if version:
-            values.setdefault("version", version.group(1))
-        if amendment:
-            values.setdefault("amendment_number", amendment.group(1))
-    index = first_label
+    index = start
     while index < len(lines):
         line = lines[index]
         index += 1
@@ -161,17 +147,57 @@ def enrich_title(path, values, others, notes):
             current = None
         elif current and line:
             collected[current].append(line)
+    return collected
+
+
+def apply_labelled_lines(values: dict[str, str], collected: dict[str, list[str]]) -> None:
     for key, pieces in collected.items():
         value = " ".join(pieces).strip()
-        if key not in ("registry_id", "regulatory_ids", "sponsor_address", "medical_monitor", "signatory",
-                       "primary_intervention") \
-                and value and not ELECTRONIC_SIGNATURE_VALUE.match(value):
+        if key not in KEYS_NOT_COPIED_FROM_LABELS and value and not ELECTRONIC_SIGNATURE_VALUE.match(value):
             values[key] = value
     if collected.get("sponsor_address"):
         sponsor = ""
         for piece in collected.get("sponsor", []) + collected["sponsor_address"]:
             sponsor = join_sponsor(sponsor, piece)
         values["sponsor"] = sponsor
+
+
+def uppercase_title_before_compound(lines: list[str]) -> str | None:
+    compound_index = next((index for index, line in enumerate(lines) if canonical_label(line) == "compound"), None)
+    if compound_index is None:
+        return None
+    title_start = next((index + 1 for index in range(compound_index - 1, -1, -1)
+                        if lines[index].lower() == "clinical study protocol"), None)
+    title_lines = lines[title_start:compound_index] if title_start is not None else []
+    if title_lines and all(line.upper() == line for line in title_lines):
+        return " ".join(title_lines)
+    return None
+
+
+def enrich_title(path, values, others, notes):
+    """Supplement title fields from PDF page text. Other inputs have no page layout, so only the title table is used."""
+    if not is_pdf(path):
+        add_amendment_from_version(values)
+        return
+    lines, second_page_lines = first_two_pages(path)
+    running_version = next((match.group(1) for match in map(RUNNING_HEADER_VERSION.match, second_page_lines) if match), None)
+    if running_version:
+        values.setdefault("version", running_version)
+        notes.append("Version Number taken from the 'Version number:' running header on page 2")
+    first_label = next((index for index, line in enumerate(lines) if PROTOCOL_LABEL_LINE.fullmatch(line)), 0)
+    registry = registry_rows(" ".join(lines))
+    date = next((line.partition(":")[2].strip() for line in lines[:first_label]
+                 if line.startswith("Date:")), None)
+    if date:
+        values["date"] = date
+    for line in lines[:first_label]:
+        version = re.fullmatch(r"Protocol Version (\S+) Final", line, re.IGNORECASE)
+        amendment = re.fullmatch(r"Protocol Amendment (\S+) Final", line, re.IGNORECASE)
+        if version:
+            values.setdefault("version", version.group(1))
+        if amendment:
+            values.setdefault("amendment_number", amendment.group(1))
+    apply_labelled_lines(values, collect_labelled_lines(lines, first_label))
     if registry:
         values["regulatory_ids"] = "; ".join(f"{label}: {identifier}" for label, identifier in dict.fromkeys(registry))
     if not values.get("sponsor"):
@@ -180,19 +206,15 @@ def enrich_title(path, values, others, notes):
             values["sponsor"] = company
             notes.append(f"Sponsor recovered from the company line in the {company} title-page layout")
     if not values.get("title"):
-        compound_index = next((index for index, line in enumerate(lines) if canonical_label(line) == "compound"), None)
-        if compound_index is not None:
-            title_start = next((index + 1 for index in range(compound_index - 1, -1, -1)
-                                if lines[index].lower() == "clinical study protocol"), None)
-            title_lines = lines[title_start:compound_index] if title_start is not None else []
-            if title_lines and all(line.upper() == line for line in title_lines):
-                values["title"] = " ".join(title_lines)
-                notes.append("Full Title recovered from the uppercase title between Clinical Study Protocol and Compound")
+        title = uppercase_title_before_compound(lines)
+        if title:
+            values["title"] = title
+            notes.append("Full Title recovered from the uppercase title between Clinical Study Protocol and Compound")
     add_amendment_from_version(values)
     notes.append("Title fields supplemented from explicit first-page labels; unrecognized title fields retained verbatim")
 
 
-def paragraphs(blocks):
+def iter_paragraphs(blocks):
     for block in blocks:
         if isinstance(block, Paragraph):
             yield block
@@ -213,7 +235,7 @@ def synopsis_title(document, values, notes):
             in_synopsis = block.number == "1.1"
         if not in_synopsis:
             continue
-        for paragraph in paragraphs([block]):
+        for paragraph in iter_paragraphs([block]):
             text = paragraph.text.strip()
             if pending and text:
                 values["title"] = text
@@ -267,7 +289,7 @@ class TitlePageFiller:
     def custody(self, key: str, needs_review: bool = False) -> JsonObject:
         return {
             "origin": "v10_derived", "v10_sources": [self.source(key, None)],
-            "actor": copy.deepcopy(self.actor), "confidence": "low" if needs_review else "high",
+            "actor": copy.deepcopy(self.actor), "confidence": LOW_CONFIDENCE if needs_review else HIGH_CONFIDENCE,
             "needs_review": needs_review,
         }
 
@@ -404,7 +426,7 @@ def collect(document, source_path) -> tuple[dict[str, str], list[tuple[str | Non
     values, others = collect_title_values(document, notes)
     synopsis_title(document, values, notes)
     enrich_title(source_path, values, others, notes)
-    if Path(source_path).suffix.lower() == PDF_SUFFIX and not values.get("confidentiality"):
+    if is_pdf(source_path) and not values.get("confidentiality"):
         statement = confidentiality_statement(source_path)
         if statement:
             values["confidentiality"] = statement

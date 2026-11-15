@@ -1,7 +1,7 @@
 """Check converted v011 .docx files against the v011 template.
 
 Usage:
-    python check_output.py [--template T] out/*.docx
+    python tools/check_output.py [--template T] out/*.docx
 
 Each docx is checked against the protocol JSON it was rendered from (<name>.generated.json for
 <name>.docx, <name>.json for <name>.pre-llm.docx). Checks: headings match the JSON's sections, every
@@ -15,17 +15,20 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import docx
 from docx.oxml.ns import qn
 
-from converter.audit import build_audit, squash
-from cross_references import OTHER_DOCUMENT, REFERENCE, replacements_for
-from pdf_to_cpt_docx import STYLE_NAMES
+from converter.audit import PRE_LLM_SUFFIX, build_audit, protocol_json_path, squash
+from converter.cross_references import OTHER_DOCUMENT, REFERENCE, replacements_for
+from converter.model import STYLE_NAMES, advance
 
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "resources" / "CPT_CoreBWE-v011.docx"
 INSTRUCTIONAL_STYLES = {"CPT_Instructional", "CPT_Example"}
-MAX_SHOWN = 8
-PRE_LLM_SUFFIX = ".pre-llm"
+MAX_SHOWN = 8  # examples listed per problem
+TEMPLATE_FLAG = re.compile(r"<(Start|End) of (common|suggested|example) text>")
+VERIFICATION_HEADING = "\nOutput verification\n"
 
 
 def output_outline(document):
@@ -36,11 +39,7 @@ def output_outline(document):
         if style not in heading_styles:
             continue
         level = heading_styles.index(style) + 1
-        del counters[level:]
-        while len(counters) < level:
-            counters.append(0)
-        counters[-1] += 1
-        outline.append((level, ".".join(map(str, counters)), paragraph.text.strip()))
+        outline.append((level, advance(counters, level), paragraph.text.strip()))
     return outline
 
 
@@ -72,7 +71,7 @@ def check_styles(document, template):
     if left:
         problems.append(f"instructional styles used: {left}")
     for paragraph in all_paragraphs(document):
-        if re.search(r"<(Start|End) of (common|suggested|example) text>", paragraph.text):
+        if TEMPLATE_FLAG.search(paragraph.text):
             problems.append(f"template flag text left: {paragraph.text[:60]}")
             break
     return problems
@@ -122,10 +121,17 @@ def check_content(document, audit):
     return problems
 
 
-def protocol_json_path(docx_path: Path) -> Path:
-    if docx_path.stem.endswith(PRE_LLM_SUFFIX):
-        return docx_path.with_name(docx_path.stem.removesuffix(PRE_LLM_SUFFIX) + ".json")
-    return docx_path.with_name(docx_path.stem + ".generated.json")
+def update_report(path, problems):
+    """Replace the "Output verification" part of the converter's report beside path with these results."""
+    report_path = path.with_suffix(".report.txt")
+    if not report_path.exists() or path.stem.endswith(PRE_LLM_SUFFIX):
+        return
+    text = report_path.read_text(encoding="utf-8").split(VERIFICATION_HEADING)[0]
+    text += VERIFICATION_HEADING + ("\n".join(problems) if problems else "All automated DOCX checks passed") + "\n"
+    if any("references to missing sections" in problem for problem in problems):
+        text += "Unresolved references remain for review: no replacement target was guessed.\n"
+    text += "Manual check still required: open in Word, update the TOC, and inspect pagination and layout against the v011 examples.\n"
+    report_path.write_text(text, encoding="utf-8")
 
 
 def main():
@@ -149,14 +155,7 @@ def main():
         print(f"{status}  {path.name}  (headings: {len(output_outline(document))})")
         for problem in problems:
             print(f"      {problem}")
-        report_path = path.with_suffix(".report.txt")
-        if report_path.exists() and not path.stem.endswith(PRE_LLM_SUFFIX):
-            text = report_path.read_text(encoding="utf-8").split("\nOutput verification\n")[0]
-            text += "\nOutput verification\n" + ("\n".join(problems) if problems else "All automated DOCX checks passed") + "\n"
-            if any("references to missing sections" in problem for problem in problems):
-                text += "Unresolved references remain for review: no replacement target was guessed.\n"
-            text += "Manual check still required: open in Word, update the TOC, and inspect pagination and layout against the v011 examples.\n"
-            report_path.write_text(text, encoding="utf-8")
+        update_report(path, problems)
     return 1 if failed else 0
 
 

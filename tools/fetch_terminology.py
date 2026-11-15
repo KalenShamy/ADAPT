@@ -1,6 +1,6 @@
 """Download the free terminology files the converter uses to code dose forms, routes, drugs and conditions.
 
-Run once: python src/fetch_terminology.py. Files go to resources/terminology/ (not committed).
+Run once: python tools/fetch_terminology.py. Files go to resources/terminology/ (not committed).
 """
 
 import io
@@ -15,8 +15,9 @@ TARGET = Path(__file__).resolve().parents[1] / "resources" / "terminology"
 def main() -> None:
     TARGET.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(NCIT_URL) as response:
-        archive = zipfile.ZipFile(io.BytesIO(response.read()))
-    archive.extractall(TARGET)
+        archive_bytes = response.read()
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        archive.extractall(TARGET)
     print(f"NCI Thesaurus -> {TARGET}")
 
 

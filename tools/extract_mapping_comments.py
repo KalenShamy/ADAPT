@@ -1,5 +1,8 @@
 """Print the V10 -> V11 mapping that TransCelerate stores as Word comments in
-CPT_CoreBWE-v011_M11-Mapping-Reference.docx, as TSV: v11 number, v11 style, v11 text, v10 mapping."""
+CPT_CoreBWE-v011_M11-Mapping-Reference.docx, as TSV: v11 number, v11 style, v11 text, v10 mapping.
+
+Usage: python tools/extract_mapping_comments.py <CPT_CoreBWE-v011_M11-Mapping-Reference.docx>
+"""
 
 import re
 import sys
@@ -21,11 +24,11 @@ def comment_text(comment: ET.Element) -> str:
 
 
 def main(docx_path: str) -> None:
-    archive = zipfile.ZipFile(docx_path)
-    comments_root = ET.fromstring(archive.read("word/comments.xml"))
+    with zipfile.ZipFile(docx_path) as archive:
+        comments_root = ET.fromstring(archive.read("word/comments.xml"))
+        document = ET.fromstring(archive.read("word/document.xml"))
     comments = {c.get(W + "id"): comment_text(c) for c in comments_root.iter(W + "comment")}
 
-    document = ET.fromstring(archive.read("word/document.xml"))
     counters = [0] * MAX_DEPTH
     print("v11_number\tv11_style\tv11_text\tv10_mapping")
     for paragraph in document.iter(W + "p"):

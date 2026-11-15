@@ -12,7 +12,7 @@ compares it with the blocks load_docx returns, in three passes:
 Anything missing is either "intentionally dropped" (template guidance, placeholders, markers, the TOC,
 title-page items the reader reports in its notes) or "unexplained". The target is zero unexplained.
 
-Usage: python docx_coverage.py SOURCE.docx [--template TEMPLATE.docx]
+Usage: python tools/docx_coverage.py SOURCE.docx [--template TEMPLATE.docx]
 """
 
 import argparse
@@ -34,7 +34,9 @@ from converter.extract.docx import (
     DATE_ONLY, DEFAULT_TEMPLATE, FRONT_HEADING_STYLE, GUIDANCE_MARKER, MIN_GUIDANCE_WORDS, NUMBERED_HEADING,
     PAGE_TITLE_STYLE, PLACEHOLDER_ONLY, TYPED_NUMBER, is_template_guidance, template_guidance,
 )
-from pdf_to_cpt_docx import COVER_HEADING, SKIPPED_FRONT_MATTER, Document, FrontHeading, Heading, Paragraph, Subheading, Table
+from converter.extract.headings import SKIPPED_FRONT_MATTER
+from converter.model import Document, FrontHeading, Heading, Paragraph, Subheading, Table
+from converter.title_fields import COVER_HEADING
 
 MIN_WORDS = 5
 MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
@@ -49,7 +51,7 @@ def squash(text: str) -> str:
 
 
 def ancestors(element) -> set[str]:
-    return {a.tag.rsplit("}", 1)[-1] for a in element.iterancestors()}
+    return {ancestor.tag.rsplit("}", 1)[-1] for ancestor in element.iterancestors()}
 
 
 def visible_texts(root, stack: list[str] | None = None) -> dict:
@@ -68,7 +70,7 @@ def visible_texts(root, stack: list[str] | None = None) -> dict:
             continue
         if ancestors(node) & {"del", "moveFrom", "Fallback"} or any(state == "code" for state in stack):
             continue
-        paragraph = next((a for a in node.iterancestors() if a.tag == qn("w:p")), None)
+        paragraph = next((ancestor for ancestor in node.iterancestors() if ancestor.tag == qn("w:p")), None)
         if paragraph is not None:
             out[paragraph] += node.text or ""
     order = {p: i for i, p in enumerate(root.iter(qn("w:p")))}
@@ -108,7 +110,7 @@ def document_text(result: Document) -> DocumentText:
             elif isinstance(block, Table):
                 tables.append(block)
                 everything.extend(table_texts(block))
-    everything.extend(texts for texts in (squash(t) for t in ordered))
+    everything.extend(ordered)
     title = " ".join(text for table in result.title_tables for text in table_texts(table))
     return DocumentText(ordered, tables, squash(title), squash(" ".join(everything)) + squash(title))
 

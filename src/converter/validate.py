@@ -1,9 +1,9 @@
 """Validate protocol JSON against schema/protocol.schema.json plus the cross-field checks."""
 
 import sys
-from pathlib import Path
 
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema"
+from converter.paths import SCHEMA_DIR
+
 sys.path.insert(0, str(SCHEMA_DIR))
 from validate_protocol import SCHEMA_PATH, load_json, validate_document  # noqa: E402
 

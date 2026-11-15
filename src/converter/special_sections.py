@@ -4,8 +4,9 @@ import copy
 import re
 from dataclasses import dataclass
 
-from cross_references import replace_text
-from pdf_to_cpt_docx import Heading, Paragraph, Subheading, Table, split_label
+from converter.cross_references import replace_text
+from converter.model import Heading, Paragraph, Subheading, Table, cell_text
+from converter.title_fields import split_label
 
 DROPPED = "dropped"
 OBJECTIVES = "objectives"
@@ -140,10 +141,6 @@ def block_text(block):
     return f"[{type(block).__name__}]"
 
 
-def cell_text(cell):
-    return " ".join(paragraph.text for paragraph in cell["paragraphs"]).strip()
-
-
 # ---------------------------------------------------------------- objectives
 
 def split_objectives(blocks):
@@ -159,11 +156,11 @@ def split_objectives(blocks):
         next_block = blocks[index + 1] if index + 1 < len(blocks) else None
         if isinstance(block, Paragraph) and block.kind == "caption" and isinstance(next_block, Table):
             caption = block  # goes with the table's first piece
-        elif isinstance(block, Paragraph) and is_bold(block) and divider_bucket(block.text):
-            current = divider_bucket(block.text)
+        elif isinstance(block, Paragraph) and is_bold(block) and (bucket := divider_bucket(block.text)):
+            current = bucket
             parts[current].append(block)
-        elif isinstance(block, Subheading) and divider_bucket(block.title):
-            current = divider_bucket(block.title)
+        elif isinstance(block, Subheading) and (bucket := divider_bucket(block.title)):
+            current = bucket
             parts[current].append(block)
         elif isinstance(block, Table):
             for bucket, piece in table_pieces(block):

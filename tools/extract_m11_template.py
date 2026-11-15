@@ -1,6 +1,6 @@
 """Extract the per-section format of the ICH M11 template, in reading order.
 
-Usage: python extract_m11_template.py <m11_template.html> <TechnicalSpecification.html> <out.json>
+Usage: python tools/extract_m11_template.py <m11_template.html> <TechnicalSpecification.html> <out.json>
 
 Both inputs are the PDF-to-HTML conversions in resources/reference/ich-m11/. The template gives each section's
 instructions, placeholders, labels and tables in order; the template does not mark which sentences are fixed protocol
@@ -13,6 +13,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 FIRST_SECTION_HEADING = "<h2><b>1</b>"
 PAGE_MARKER = re.compile(r"<h6>Page \d+</h6>")
@@ -333,11 +334,11 @@ def template_sections(template_html: str, universal_by_section: dict[str, list[s
 
 def main() -> None:
     template_path, spec_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-    with open(template_path) as template_file, open(spec_path) as spec_file:
-        template_html, spec_html = template_file.read(), spec_file.read()
+    template_html = Path(template_path).read_text(encoding="utf-8")
+    spec_html = Path(spec_path).read_text(encoding="utf-8")
     universal = universal_text_by_section(spec_records(spec_html))
     sections = template_sections(template_html, universal)
-    with open(out_path, "w") as out_file:
+    with open(out_path, "w", encoding="utf-8") as out_file:
         json.dump({number: section.as_json() for number, section in sections.items()}, out_file,
                   indent=1, ensure_ascii=False)
         out_file.write("\n")

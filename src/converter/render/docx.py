@@ -7,40 +7,31 @@ from docx.enum.text import WD_COLOR_INDEX
 from docx.oxml.ns import qn
 from docx.shared import RGBColor
 
-from block_xhtml import xhtml_to_blocks
+from converter.block_xhtml import xhtml_to_blocks
 from converter.parts import COLLECTION_PARTS, COLLECTION_SECTION_PATH
 from converter.place import SOURCE_TABLE_CAPTION, captioned_tables
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, render_values
+from converter.protocol_fields import (
+    AI_ORIGINS, LEAD_INS, MISSING_TEXT, NO_BASIS_CONFIDENCE, NOT_APPLICABLE_TEXT, VERY_LOW, is_ai, is_lead_in,
+)
 from converter.render.renumber import (
     displayed_numbers, is_sub_label, ordered_children, renumber_blocks, renumber_text,
 )
-from pdf_to_cpt_docx import (
-    MISSING_FIELD_VALUE, Figure, PageMark, Table, Writer, advance, amendment_state, write_block, write_title_page,
-)
+from converter.model import Figure, JsonObject, PageMark, Table, advance
+from converter.render.writer import MISSING_FIELD_VALUE, Writer, write_block, write_title_page
+from converter.title_fields import amendment_state
 
-type JsonObject = dict[str, object]
 
 TEMPLATE_VERSION = "v011"
-MISSING_TEXT = "[NOT EXTRACTED: no content found in the source protocol]"
-NOT_APPLICABLE_TEXT = "Not applicable"
 LOW_CONFIDENCE_NOTE = "[AI-drafted from the source protocol. Review required.]"  # only on output with no source basis
 LOW_CONFIDENCE_TEXT_COLOR = RGBColor(0xFF, 0xFF, 0xFF)
-LOW_CONFIDENCE = "very_low"
 NO_BASIS_NOTE = "[AI draft failed. Human authorship required]"
-NO_BASIS_CONFIDENCE = "none"
 AI_TABLE_FILL = "FFFF00"  # Word's yellow highlight, so generated table cells match highlighted generated text
 VALUE_COLUMN = (1,)  # label/value tables: column 0 holds the fixed M11 labels
-AI_ORIGINS = ("ai_generated", "ai_transformed")
 BRACKET_COLOR = RGBColor(0xC0, 0x00, 0x00)
 BRACKET_SPAN = re.compile(r"(\[[^\]]*\])")
 UNSPLIT_TEXT = "[Not separated in the source protocol; see the section text below]"
 
-# Fixed M11 wording the validator checks; the source's own lead-in sentence is replaced, not repeated
-LEAD_INS = {
-    "5.2": "To be eligible to participate in this trial, an individual must meet all the following criteria:",
-    "5.3": "An individual who meets any of the following criteria will be excluded from participation in this trial:",
-    "11.1": "This trial will be conducted in accordance with the protocol and with the following:",
-}
 CLOSING_TEXT = {
     "5.1": "Prospective approval of protocol deviations to recruitment and enrollment criteria, "
            "also known as protocol waivers or exemptions, is not permitted.",
@@ -231,9 +222,10 @@ class DocxRenderer:
             self.writer.paragraph(self.writer.styles["field_label"], text=str(section["title"]))
         else:
             self.heading(str(section["title"]), level)
-        if number == "1.1.1" and section.get("fields", {}).get("summary_rows"):
+        fields = section.get("fields", {})
+        if number == "1.1.1" and fields.get("summary_rows"):
             content = []  # the rows table replaces the source's synopsis table
-        content = self.fixed_text(number, content, section.get("fields", {}))
+        content = self.fixed_text(number, content, fields)
         # 3.2, 3.3 and 10.5 stay not_applicable until their items are generated, even with source text held under them
         holds_source_text = status == "not_applicable" and bool(section.get("additional_subsections"))
         if number != PRIOR_AMENDMENTS_SECTION and not holds_source_text:  # 12.3's M11 statement always fills it
@@ -247,9 +239,9 @@ class DocxRenderer:
                 self.block(block, landscape[id(block)])
         if number in CLOSING_TEXT:
             self.writer.paragraph(self.writer.styles["body"], text=CLOSING_TEXT[number])
-        for criterion in section.get("fields", {}).get("criteria", []):
+        for criterion in fields.get("criteria", []):
             self.criterion(criterion)
-        self.field_tables(number, section.get("fields", {}))
+        self.field_tables(number, fields)
         self.objectives(section.get("objectives", []), level + 1)
         for child in children:
             self.section(child, level + 1)
@@ -455,23 +447,11 @@ class DocxRenderer:
     def placeholder(self, text: str, style=None) -> None:
         """A paragraph where every [bracketed] span is red text."""
         paragraph = self.writer.paragraph(style or self.writer.styles["body"])
-        for part in BRACKET_SPAN.split(text):
-            if not part:
-                continue
-            run = paragraph.add_run(part)
-            if BRACKET_SPAN.fullmatch(part):
-                run.font.color.rgb = BRACKET_COLOR
+        add_bracket_runs(paragraph, text)
 
     def highlighted(self, text: str) -> None:
         paragraph = self.writer.paragraph(self.writer.styles["body"])
-        for part in BRACKET_SPAN.split(text):
-            if not part:
-                continue
-            run = paragraph.add_run(part)
-            if BRACKET_SPAN.fullmatch(part):
-                run.font.color.rgb = BRACKET_COLOR
-            else:
-                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        add_bracket_runs(paragraph, text, highlight_rest=True)
 
     def table_caption(self, title: str) -> None:
         """'Table N: title' above the next table, numbered in document order."""
@@ -666,18 +646,35 @@ def filled_text(fields: JsonObject, paths: list[str], separator: str = " ") -> s
     return separator.join(value for value in values if value)
 
 
-def slot_values(fields: JsonObject, path: str) -> str:
-    slot = fields
+def slot_at(fields: JsonObject, path: str) -> object:
+    """The slot at a dotted path; an empty dict where the path leads nowhere."""
+    slot: object = fields
     for part in path.split("."):
         slot = slot.get(part, {}) if isinstance(slot, dict) else {}
-    return "; ".join(slot_displays(slot))
+    return slot
+
+
+def slot_values(fields: JsonObject, path: str) -> str:
+    return "; ".join(slot_displays(slot_at(fields, path)))
+
+
+def add_bracket_runs(paragraph, text: str, highlight_rest: bool = False) -> None:
+    """Add `text` to `paragraph` with each [bracketed] span in red; the rest is yellow-highlighted if `highlight_rest`."""
+    for part in BRACKET_SPAN.split(text):
+        if not part:
+            continue
+        run = paragraph.add_run(part)
+        if BRACKET_SPAN.fullmatch(part):
+            run.font.color.rgb = BRACKET_COLOR
+        elif highlight_rest:
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
 
 def label_text(label: str, fields: JsonObject) -> str:
     """The filled text written under a 1.1.2 label; empty when nothing is filled."""
-    paths = LABEL_SLOTS.get(label, [])
     if label == PARTICIPANTS_LABEL:
         return participants_sentence(fields)
+    paths = LABEL_SLOTS.get(label, [])
     if label in LINE_PER_SLOT_LABELS:
         return filled_text(fields, paths, "\n")
     return filled_text(fields, paths)
@@ -702,22 +699,20 @@ def has_text(content: list[JsonObject]) -> bool:
     return any(not block.get("has_image") for block in content)
 
 
-def is_lead_in(block: JsonObject) -> bool:
-    return block["type"] == "paragraph" and block["text"].rstrip().endswith(":")
-
-
 def is_title_field(item: JsonObject) -> bool:
     return item["v10_source"]["section_id"] == TITLE_PAGE_UNMAPPED_ID
 
 
-def is_ai(block: JsonObject) -> bool:
-    return block["custody"]["origin"] in AI_ORIGINS
+def ai_confidence(custody: object) -> object:
+    """The confidence recorded for AI-written content; None when `custody` is missing or not AI-origin."""
+    if isinstance(custody, dict) and custody.get("origin") in AI_ORIGINS:
+        return custody.get("confidence")
+    return None
 
 
 def is_no_basis(custody: object) -> bool:
     """The model was asked to draft this and found nothing in the source to infer it from."""
-    return isinstance(custody, dict) and custody.get("origin") in AI_ORIGINS \
-        and custody.get("confidence") == NO_BASIS_CONFIDENCE
+    return ai_confidence(custody) == NO_BASIS_CONFIDENCE
 
 
 def is_no_basis_slot(slot: JsonObject) -> bool:
@@ -732,21 +727,14 @@ def is_low_confidence(node: object) -> bool:
         return any(is_low_confidence(item) for item in node)
     if not isinstance(node, dict):
         return False
-    custody = node.get("custody")
-    if isinstance(custody, dict) and custody.get("origin") in AI_ORIGINS and custody.get("confidence") == LOW_CONFIDENCE:
+    if ai_confidence(node.get("custody")) == VERY_LOW:
         return True
     return any(is_low_confidence(value) for key, value in node.items() if key != "custody")
 
 
 def label_slots(label: str, fields: JsonObject) -> list[object]:
     """The slots whose values are written under a 1.1.2 label."""
-    slots = []
-    for path in LABEL_SLOTS.get(label, []):
-        slot: object = fields
-        for part in path.split("."):
-            slot = slot.get(part, {}) if isinstance(slot, dict) else {}
-        slots.append(slot)
-    return slots
+    return [slot_at(fields, path) for path in LABEL_SLOTS.get(label, [])]
 
 
 def flat_slots(slots: list[object]) -> list[JsonObject]:

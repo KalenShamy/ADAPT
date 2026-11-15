@@ -7,7 +7,7 @@ block takes the part named by the nearest subheading above it, or else by the v0
 
 import re
 
-type JsonObject = dict[str, object]
+from converter.model import JsonObject
 
 COLLECTION_SECTION_PATH = ("9", "9.2", "9.2.2")
 # Checked in order; a heading naming two parts ("Recording and Follow-Up") takes the first match

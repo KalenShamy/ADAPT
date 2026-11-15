@@ -1,13 +1,12 @@
 import json
 import re
-import sys
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
+import paths  # noqa: F401
 from extract_m11_template import spec_records, template_sections, universal_text_by_section
+
+ROOT = Path(__file__).resolve().parents[1]
 
 REFERENCE = ROOT / "resources" / "reference" / "ich-m11"
 TEMPLATE_HTML = REFERENCE / "m11_final_template_5.20.26.html"

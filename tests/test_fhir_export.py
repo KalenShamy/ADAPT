@@ -8,7 +8,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+import paths  # noqa: F401,E402
 sys.path.insert(0, str(REPO_ROOT / "schema"))
 
 from converter.export.fhir import (  # noqa: E402

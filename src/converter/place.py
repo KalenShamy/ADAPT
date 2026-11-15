@@ -6,27 +6,27 @@ each block's `source_index`, which for PDF input is the block's position in the 
 
 import copy
 import hashlib
-import json
 import re
 import sys
 from collections.abc import Iterator
-from datetime import datetime, timezone
 from pathlib import Path
 
-from block_xhtml import blocks_to_xhtml
-from pdf_to_cpt_docx import MAX_CAPTION_LENGTH, Figure, PageMark, Paragraph, Redaction, Span, Table
+from converter.block_xhtml import blocks_to_xhtml
+from converter.generate.fill import allowed_statuses
+from converter.paths import SCHEMA_DIR
+from converter.model import (
+    Figure, JsonObject, MAX_CAPTION_LENGTH, PageMark, Paragraph, Redaction, Span, Subheading, Table, now_iso,
+)
 from converter.criteria import fill_criteria
 from converter.generate.guidance import template_sections
 from converter.parts import tag_collection_parts
-from cross_references import rewrite_cross_references
+from converter.cross_references import rewrite_cross_references
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, TitlePageFiller, collect
-from restructure import Subheading, front_parts, iter_blocks, iter_nodes, restructure
+from converter.restructure import front_parts, iter_blocks, restructure
 
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema"
 sys.path.insert(0, str(SCHEMA_DIR))
-from minimal_instance_builder import minimal_instance, v10_source  # noqa: E402
+from minimal_instance_builder import minimal_instance  # noqa: E402
 
-type JsonObject = dict[str, object]
 
 SOURCE_TEMPLATE = "CPT v010"
 TARGET_TEMPLATE = "CPT v011"
@@ -51,21 +51,13 @@ INTERVENTION_TABLE_LABELS = ("Intervention Label", "Arm Title")
 SOURCE_TABLE_CAPTION = re.compile(r"^Table\s+([\dA-Z][\w.\-]*?)[.:]?\s+(\S.*)", re.DOTALL)  # label, title
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def paragraph_text(paragraph: Paragraph) -> str:
-    return "".join(span.text for span in paragraph.spans).strip()
-
-
 def table_rows(table: Table) -> list[list[str]]:
     return [
-        ["\n".join(paragraph_text(p) for p in cell["paragraphs"]) if cell else "" for cell in row]
+        ["\n".join(p.text for p in cell["paragraphs"]) if cell else "" for cell in row]
         for row in table.grid
     ]
 
@@ -98,8 +90,7 @@ class Placer:
         return [PageMark(True, page)] if self.landscape_pages.get(page) else []
 
     def block(self, block: object, section_source: JsonObject) -> JsonObject:
-        index = self.next_index
-        self.next_index += 1
+        index = self.take_index()
         self.layout[str(index)] = blocks_to_xhtml([*self.landscape_marks(block), block], self.assets_dir)
         source = {**section_source, "source_indices": [index], "portion": "all"}
         base = {"source_index": index, "custody": custody("v10_derived", [source])}
@@ -112,17 +103,16 @@ class Placer:
         if isinstance(block, Redaction):
             return {"type": "paragraph", "text": REDACTED_TEXT, "style": BODY_STYLE, **base}
         style = BULLET_STYLE if block.kind == "bullet" else BODY_STYLE
-        return {"type": "paragraph", "text": paragraph_text(block), "style": style, **base}
+        return {"type": "paragraph", "text": block.text, "style": style, **base}
 
     def section_content(self, node: object, ancestor_number: str) -> tuple[list[JsonObject], list[JsonObject]]:
         """Content blocks and the section's V10Sources for one output node."""
+        source_number = node.source_numbers[0] if node.source_numbers else None
         if node.from_template:
-            source_number = node.source_numbers[0] if node.source_numbers else None
             renumbered = source_number is not None and source_number != node.template_number
             match = "renumbered" if renumbered else "exact"
             section_id = f"v10:{source_number}" if source_number else f"v10:{ancestor_number}.unmapped"
         else:
-            source_number = node.source_numbers[0] if node.source_numbers else None
             match = "protocol_added"
             section_id = f"v10:{ancestor_number}.unmapped"
         section_source = {
@@ -138,7 +128,8 @@ class Placer:
     def additional_subsection(self, node: object, ancestor_number: str) -> JsonObject:
         blocks, sources = self.section_content(node, ancestor_number)
         children = [self.additional_subsection(child, ancestor_number) for child in node.children]
-        heading_source = {**(sources[0] if sources else self.heading_only_source(node, ancestor_number)), "match": "protocol_added", "portion": "all"}
+        first_source = sources[0] if sources else self.heading_only_source(node, ancestor_number)
+        heading_source = {**first_source, "match": "protocol_added", "portion": "all"}
         heading_source["section_id"] = f"v10:{ancestor_number}.unmapped"
         return {
             "number": None, "title": node.title, "level": node.level,
@@ -149,8 +140,7 @@ class Placer:
         }
 
     def heading_only_source(self, node: object, ancestor_number: str) -> JsonObject:
-        index = self.next_index
-        self.next_index += 1
+        index = self.take_index()
         return {"section_id": f"v10:{ancestor_number}.unmapped", "found_number": None,
                 "found_heading": node.title, "match": "protocol_added", "source_indices": [index], "portion": "all"}
 
@@ -186,11 +176,6 @@ def fill_placeholder_titles(sections: JsonObject) -> None:
         children = section.get("subsections")
         if isinstance(children, dict):
             fill_placeholder_titles(children)
-
-
-def allowed_statuses(schema: JsonObject, number: str) -> list[str]:
-    definition = schema["$defs"].get("Section_" + number.replace(".", "_"), {})
-    return definition.get("properties", {}).get("status", {}).get("enum", [])
 
 
 def place_node(protocol: JsonObject, schema: JsonObject, placer: Placer, node, template_ancestor: JsonObject | None) -> None:
@@ -333,7 +318,7 @@ def numbered_targets(protocol: JsonObject, result) -> dict[str, str]:
     return {source: heading_number.get(number, number) for source, number in result.number_map.items()}
 
 
-def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outline, assets_dir: Path, template_file: str):
+def place_document(document, source_path: Path, schema: JsonObject, crosswalk, outline, assets_dir: Path, template_file: str):
     """Return (protocol JSON, layout sidecar dict, restructure report)."""
     result = restructure(document, crosswalk, outline)
     protocol = minimal_instance(schema)
@@ -342,7 +327,7 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     result.report.notes.extend(f"Cross-reference to review: {entry}" for entry in references.review)
     result.report.notes.extend(f"Cross-reference unresolved: {entry}" for entry in references.unresolved)
     protocol["source"] = {
-        "path": str(pdf_path), "file_name": pdf_path.name, "sha256": file_sha256(pdf_path),
+        "path": str(source_path), "file_name": source_path.name, "sha256": file_sha256(source_path),
         "template": SOURCE_TEMPLATE, "extracted_at": now_iso(),
     }
     protocol["target"] = {"template": TARGET_TEMPLATE, "template_file": template_file}
@@ -358,7 +343,7 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     placer = Placer(assets_dir, result.landscape_pages)
     for root in result.nodes:
         place_node(protocol, schema, placer, root, None)
-    values, other_fields = collect(document, pdf_path)
+    values, other_fields = collect(document, source_path)
     TitlePageFiller(protocol, schema, placer.take_index, SCRIPT_ACTOR).fill(values)
     protocol["unplaced_v10_content"] = (
         unplaced_front(placer, result.front + result.amendment_details) + unplaced_title_fields(placer, other_fields)
@@ -368,6 +353,6 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
     result.report.notes.extend(move_intervention_tables(protocol))
     protocol["processing_log"] = [{
         "step": "place", "actor": copy.deepcopy(SCRIPT_ACTOR), "at": now_iso(),
-        "summary": f"placed {placer.next_index} blocks from {pdf_path.name}",
+        "summary": f"placed {placer.next_index} blocks from {source_path.name}",
     }]
     return protocol, placer.layout, result.report

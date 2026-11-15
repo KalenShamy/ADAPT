@@ -14,28 +14,28 @@ the JSON lacks carries the data-absent-reason extension instead of a guess. For 
 is not a valid encoding (the binding needs a code), so the report marks it NOT CONFORMANT.
 """
 
-import copy
-
 import argparse
 import base64
+import copy
 import json
 import mimetypes
 import re
 import tarfile
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from converter.render.docx import LEAD_INS, MISSING_TEXT, NOT_APPLICABLE_TEXT, is_ai, is_lead_in
+from converter.model import JsonObject, now_iso
+from converter.paths import RESOURCES_DIR
+from converter.protocol_fields import (
+    AI_ORIGINS, LEAD_INS, LOW_CONFIDENCE, MISSING_TEXT, NO_BASIS_CONFIDENCE, NOT_APPLICABLE_TEXT, VERY_LOW, is_ai, is_lead_in,
+)
 from converter.render.renumber import natural_key
 
-type JsonObject = dict[str, object]
 
-REPO = Path(__file__).resolve().parents[3]
-IG_PACKAGE = REPO / "resources" / "reference" / "hl7-fhir" / "package.tgz"
-IDENTIFIER_SYSTEMS = REPO / "resources" / "fhir" / "identifier-systems.json"
+IG_PACKAGE = RESOURCES_DIR / "reference" / "hl7-fhir" / "package.tgz"
+IDENTIFIER_SYSTEMS = RESOURCES_DIR / "fhir" / "identifier-systems.json"
 
 IG_STRUCTURES = "http://hl7.org/fhir/uv/clinical-study-protocol/StructureDefinition/"
 RESEARCH_STUDY_PROFILE = IG_STRUCTURES + "m11-research-study-profile"
@@ -99,7 +99,6 @@ IDENTIFIER_TYPES = {
     "other": "C218690",
 }
 
-AI_ORIGINS = ("ai_generated", "ai_transformed")
 BLOCK_TYPES = ("paragraph", "table", "heading")
 SECTION_DISPLAY = re.compile(r"^ICH M11 Protocol Section (\d+(?:\.\d+)*) ")
 # M11 repeats these sections once per objective; the value set codes the section once, numbered 1
@@ -108,7 +107,7 @@ FIGURE_TEXT = "Figure"
 INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 ELEMENT_ID_CHARS = re.compile(r"[^A-Za-z0-9.-]+")
 MAX_ELEMENT_ID = 64
-LOW_CONFIDENCE_LEVELS = ("low", "very_low", "none")
+LOW_CONFIDENCE_LEVELS = (LOW_CONFIDENCE, VERY_LOW, NO_BASIS_CONFIDENCE)
 WITHHELD = "withheld"
 NEEDS_INPUT_TEXT = "[Needs human input: withheld from this export because its confidence was low]"
 NEEDS_INPUT_CLASS = "needs-human-input"
@@ -910,7 +909,7 @@ class FhirExporter:
     def provenance(self, composition_url: str, section: AiSection) -> JsonObject:
         generated_only = all(custody["origin"] == "ai_generated" for custody in section.custodies)
         actors = {json.dumps(custody["actor"], sort_keys=True): custody["actor"] for custody in section.custodies}
-        models = ", ".join(sorted(f"{actor.get('model', 'unknown model')}" for actor in actors.values()))
+        models = ", ".join(sorted(actor.get('model', 'unknown model') for actor in actors.values()))
         action = "drafted" if generated_only else "rewritten from source text"
         if section.not_applicable:
             action = "marked not applicable" if generated_only else f"{action} and marked not applicable"
@@ -937,10 +936,6 @@ def remove_keeping_tail(parent: ET.Element, child: ET.Element) -> None:
         else:
             parent.text = (parent.text or "") + child.tail
     parent.remove(child)
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def export_fhir(protocol: JsonObject, layout: dict[str, str], assets_dir: Path, timestamp: str | None = None,

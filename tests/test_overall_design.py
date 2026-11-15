@@ -1,25 +1,13 @@
 import json
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
 from converter.generate.fields import interventions_extraction, safety_reporting_extraction, extract_country_regions, extract_objectives, extract, fields_description, navigate, overall_design_extraction, section_at, typed_value
 from converter.render.docx import filled_text, label_text
+from helpers import FakeClient
 from converter.validate import load_schema, validate_document
 from minimal_instance_builder import minimal_instance  # noqa: E402  (schema/ is on the path via converter.validate)
-
-
-class FakeClient:
-    name = "fake"
-    model = "fake"
-
-    def __init__(self, answer):
-        self.answer = answer
-
-    def complete(self, prompt):
-        return json.dumps(self.answer)
 
 
 class SequenceClient(FakeClient):

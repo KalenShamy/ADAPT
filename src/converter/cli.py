@@ -13,23 +13,20 @@ from converter.generate.context import all_section_contexts
 from converter.generate.fields import extract_structured_fields
 from converter.generate.fill import generate_missing
 from converter.generate.table_titles import title_untitled_tables
+from converter.paths import DEFAULT_CROSSWALK, REPO_ROOT, RESOURCES_DIR
 from converter.omit import omit_empty_optional
 from converter.place import place_document
 from converter.render.docx import render_docx
 from converter.validate import load_schema, validate_document
-from restructure import load_crosswalk, template_outline
+from converter.restructure import load_crosswalk, template_outline
 
-
-
-RESOURCES = Path(__file__).resolve().parents[2] / "resources"
-DEFAULT_TEMPLATE = RESOURCES / "CPT_CoreBWE-v011.docx"
-DEFAULT_CROSSWALK = RESOURCES / "research" / "crosswalk.tsv"
-TOOLS = RESOURCES.parent / "tools"
+DEFAULT_TEMPLATE = RESOURCES_DIR / "CPT_CoreBWE-v011.docx"
+TOOLS = REPO_ROOT / "tools"
 DOCX_VALIDATORS = (
     ("validate_m11", "m11", "validate_m11.py"),
     ("validate_cesharp", "cesharp", "validate_cesharp.py"),
 )
-
+LOG_LINES_SHOWN = 8
 
 PDF_SUFFIX = ".pdf"
 DOCX_SUFFIX = ".docx"
@@ -63,11 +60,15 @@ def crosswalk_targets(crosswalk: dict) -> frozenset[str]:
     )
 
 
-def check(protocol: dict[str, object], stage: str) -> None:
+def require_valid(protocol: dict[str, object], stage: str) -> None:
     errors, _ = validate_document(protocol)
     if errors:
         shown = "\n".join(errors[:10])
         raise ValidationFailed(f"{stage} JSON failed schema validation ({len(errors)} errors):\n{shown}")
+
+
+def schema_errors(candidate: dict[str, object]) -> list[str]:
+    return validate_document(candidate)[0]
 
 
 def write_json(path: Path, data: object) -> None:
@@ -92,8 +93,8 @@ def run_docx_validators(docx: Path, validators: dict[str, Path]) -> list[str]:
 
 
 def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_path: Path,
-                  backend: str | None, model: str | None, dump_context: bool = False,
-                  validators: dict[str, Path] | None = None, fhir: bool = True) -> list[str]:
+                 backend: str | None, model: str | None, dump_context: bool = False,
+                 validators: dict[str, Path] | None = None, fhir: bool = True) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     name = source_path.stem
     assets_dir = out_dir / f"{name}.assets"
@@ -102,9 +103,9 @@ def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_pat
     source = load_source(source_path)
     protocol, layout, report = place_document(
         source, source_path, schema, crosswalk, template_outline(template),
-        assets_dir, str(template.relative_to(RESOURCES.parent)),
+        assets_dir, str(template.relative_to(REPO_ROOT)),
     )
-    check(protocol, "placed")
+    require_valid(protocol, "placed")
     write_json(out_dir / f"{name}.json", protocol)
     write_json(out_dir / f"{name}.layout.json", layout)
     render_docx(protocol, layout, assets_dir, template, out_dir / f"{name}.pre-llm.docx", name)
@@ -114,17 +115,14 @@ def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_pat
              *(f"docx: {note}" for note in getattr(source, "notes", []))]
     if backend is not None:
         client = make_client(backend, model)
-        def schema_errors(candidate: dict[str, object]) -> list[str]:
-            return validate_document(candidate)[0]
-
         generated = generate_missing(protocol, client, schema_errors, schema, crosswalk_targets(crosswalk))
         generated = extract_structured_fields(generated, client, schema, schema_errors)
         title_untitled_tables(generated, client)
         omit_empty_optional(generated, schema)
-        check(generated, "generated")
+        require_valid(generated, "generated")
         write_json(out_dir / f"{name}.generated.json", generated)
         render_docx(generated, layout, assets_dir, template, out_dir / f"{name}.docx", name)
-        lines.extend(entry["summary"] for entry in generated["processing_log"][-8:])
+        lines.extend(entry["summary"] for entry in generated["processing_log"][-LOG_LINES_SHOWN:])
         if fhir:
             exported = export_fhir(generated, layout, assets_dir)
             write_json(out_dir / f"{name}.fhir.json", exported.bundle)

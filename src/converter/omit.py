@@ -1,6 +1,7 @@
 """Drop optional sections that are still empty once drafting is done, instead of leaving red placeholders."""
 
-from converter.generate.fill import JsonObject, allowed_statuses, now_iso
+from converter.generate.fill import allowed_statuses
+from converter.model import JsonObject, now_iso
 
 OMITTED = "omitted"
 SCRIPT_ACTOR: JsonObject = {"kind": "script", "name": "converter.omit", "version": "1"}

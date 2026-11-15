@@ -1,10 +1,10 @@
 """Check the C-codes in converted protocols against the NCI terminology.
 
 Usage:
-    python check_codes.py out/*.docx
-    python check_codes.py out/*.json
+    python tools/check_codes.py out/*.docx
+    python tools/check_codes.py out/*.json
 
-Each docx is checked through the protocol JSON it was rendered from (see check_output.protocol_json_path),
+Each docx is checked through the protocol JSON it was rendered from (see converter.audit.protocol_json_path),
 since the docx only shows decodes. Every {code, decode} value in the JSON is checked:
   - the code looks like C<digits>
   - the code exists in the ICH M11 terminology (no `system`) or NCI Thesaurus (`system` other or CDISC SDTM)
@@ -18,16 +18,19 @@ Exits 1 if any check fails.
 import argparse
 import csv
 import json
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import docx
 from docx.oxml.ns import qn
 
-from check_output import protocol_json_path
-from converter.audit import squash
+from check_output import MAX_SHOWN
+from converter.audit import protocol_json_path, squash
 from converter.terminology import normalize
 from converter.terminology.ncit import NCIT_FILE, SYNONYMS_COLUMN
 
@@ -36,8 +39,7 @@ M11_TERMINOLOGY = (Path(__file__).resolve().parent.parent / "resources" / "refer
 NCIT_SYSTEMS = {"other", "CDISC SDTM"}
 M11_SYNONYM_SEPARATORS = ";|"
 NCIT_LIST_SEPARATOR = "|"
-MAX_SHOWN = 8
-CODE_PATTERN_START = "C"
+C_CODE = re.compile(r"C\d+")
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ def check_values(values: list[CodedValue], m11_terms, ncit_names) -> tuple[list[
     for value in values:
         decodes_by_code[value.code].add(value.decode)
         where = f"{value.path}: {value.code} {value.decode!r}"
-        if not value.code.startswith(CODE_PATTERN_START) or not value.code[1:].isdigit():
+        if not C_CODE.fullmatch(value.code):
             problems.append(f"{where}: not a C-code")
         elif value.system is None:
             problems += check_m11_value(value, where, m11_terms)

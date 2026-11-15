@@ -1,7 +1,7 @@
 """Per-section drafting guidance and the ICH M11 format each section must follow.
 
 The format comes from the M11 template (resources/research/m11_template_sections.json, built by
-src/extract_m11_template.py) and the Technical Specification data elements (m11_elements.json). The spec's user
+tools/extract_m11_template.py) and the Technical Specification data elements (m11_elements.json). The spec's user
 guidance and the CPT v011 key instructions fill in for sections the template has no entry for.
 """
 
@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
-RESEARCH_DIR = Path(__file__).resolve().parents[3] / "resources" / "research"
+from converter.model import JsonObject
+from converter.paths import RESEARCH_DIR
+
 M11_GUIDANCE_PATH = RESEARCH_DIR / "m11_user_guidance.json"
 M11_TEMPLATE_PATH = RESEARCH_DIR / "m11_template_sections.json"
 M11_ELEMENTS_PATH = RESEARCH_DIR / "schema-inputs" / "m11_elements.json"
@@ -21,8 +23,6 @@ V11_INVENTORY_PATH = RESEARCH_DIR / "schema-inputs" / "v11_inventory.json"
 REPEAT_PART = "X"
 MAX_LISTED_VALUES = 12  # longer pick lists are summarised by count; the extractors offer them in full
 CROSS_REFERENCE = re.compile(r"\bSections? (\d+(?:\.\d+)*)")
-
-type JsonObject = dict[str, object]
 
 
 @cache

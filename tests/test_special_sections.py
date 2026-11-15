@@ -1,11 +1,9 @@
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import paths  # noqa: F401
 
-from pdf_to_cpt_docx import Heading, Paragraph, Span, Subheading, Table
-from special_sections import split_objectives, table_provenance
+from converter.model import Heading, Paragraph, Span, Subheading, Table
+from converter.special_sections import split_objectives, table_provenance
 
 
 def cell(text, colspan=1, rowspan=1):

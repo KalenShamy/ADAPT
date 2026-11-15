@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_to_cpt_docx import (
-    REDACTED_TITLES, Document, Figure, Heading, body_font_size, classify_paragraphs, collapse_redactions, join_across_pages,
-    merge_split_tables, read_pdf, structure,
-)
+from converter.extract.blocks import classify_paragraphs, collapse_redactions, join_across_pages, merge_split_tables
+from converter.extract.headings import body_font_size, structure
+from converter.extract.pdf_reader import read_pdf
+from converter.model import REDACTED_TITLES, Document, Figure, Heading
 
 BOOKMARK_NUMBER = re.compile(r"^(\d+(?:\.\d+)*)(?:\.?\s|$)")
 

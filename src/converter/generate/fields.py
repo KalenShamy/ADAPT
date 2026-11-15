@@ -8,24 +8,28 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date
 
+from converter.model import JsonObject, merge_sources
 from converter.generate.client import LlmClient, LlmError
-from converter.generate.context import SourceIndex, merge_sources, section_context
-from converter.generate.fill import NO_BASIS, NO_BASIS_CONFIDENCE, now_iso
+from converter.generate.context import SourceIndex, section_context
+from converter.generate.fill import NO_BASIS, count_and_names, log_llm_step, restore
 from converter.generate.guidance import format_lines, section_format
-from converter.generate.prompts import CONFIDENCE_LEVELS, parse_response
+from converter.generate.prompts import parse_response
+from converter.protocol_fields import CONFIDENCE_LEVELS, HIGH_CONFIDENCE, NO_BASIS_CONFIDENCE, VERY_LOW
 from converter.title_page import render_values
-from pdf_to_cpt_docx import amendment_state
+from converter.title_fields import amendment_state
 from converter.terminology import TermRegistry, normalize
 from converter.terminology.registry import default_registry
 
-type JsonObject = dict[str, object]
 type Validator = Callable[[JsonObject], list[str]]
 
 MAX_OFFERED_CODES = 40
 LLM_CONFIDENCE = "medium"  # when the model gives no confidence of its own
 NOT_APPLICABLE_ANSWER = "not applicable"
 ISO_COUNTRY_SYSTEM = "ISO 3166-1"
-SCRIPT_ACTOR: JsonObject = {"kind": "script", "name": "converter.generate.fields", "version": "1"}
+AMENDMENT_DETAILS = "amendment_details"  # the one extraction target that is a top-level block, not a section
+M11_FORMAT_KEYS = {AMENDMENT_DETAILS: "Amendment Details"}
+SCRIPT_NAME = "converter.generate.fields"
+SCRIPT_ACTOR: JsonObject = {"kind": "script", "name": SCRIPT_NAME, "version": "1"}
 EVIDENCE_KEY = "evidence"
 MIN_EVIDENCE_WORDS = 3  # shorter quotes ("24 hours", "SAE") match almost any safety text, unless they are the value
 UNSUPPORTED_NOTE = "No quote from the source supports this value."
@@ -33,7 +37,7 @@ NOT_IN_SOURCE_KEY = "not_in_source"
 NOT_IN_SOURCE_NOTE = "The source does not state this value; the model filled in the most likely one."
 REVIEW_NOTES = (UNSUPPORTED_NOTE, NOT_IN_SOURCE_NOTE)
 QUOTE_CHARACTERS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"',
-                                  "–": "-", "—": "-", " ": " "})
+                                  "–": "-", "—": "-"})
 EVIDENCE_INSTRUCTION = (
     f'Each row object also has an "{EVIDENCE_KEY}" object mapping each text field you fill to the words in the SOURCE '
     "PROTOCOL that state it, copied exactly as one contiguous phrase. Leave a field out of "
@@ -187,7 +191,7 @@ def format_block(*numbers: str) -> str:
 # ---------------------------------------------------------------- building slots
 
 def missing_slot() -> JsonObject:
-    custody = {"origin": "none", "v10_sources": [], "actor": dict(SCRIPT_ACTOR), "confidence": "high", "needs_review": False}
+    custody = {"origin": "none", "v10_sources": [], "actor": dict(SCRIPT_ACTOR), "confidence": HIGH_CONFIDENCE, "needs_review": False}
     return {"value": None, "status": "missing", "custody": custody}
 
 
@@ -303,12 +307,19 @@ def build_slot(description: JsonObject, raw: object, context: Context, client: L
     return {"value": value, "status": "filled", "custody": ai_custody(context, client)}
 
 
+def list_item(entry: object, context: Context) -> tuple[object, Context]:
+    """A list entry the model wrapped as {"item": value, "confidence": ...}, with the context for its confidence."""
+    if isinstance(entry, dict) and "item" in entry:
+        return entry["item"], with_confidence(context, entry)
+    return entry, context
+
+
 def build_value(description: JsonObject, raw: object, context: Context, client: LlmClient) -> object:
     """A slot, list of slots, or record of them for the model's raw answer."""
     kind = description["kind"]
     if kind == "list":
         items = raw if isinstance(raw, list) else []
-        built = [build_value(description["item"], item, context, client) for item in items]
+        built = [build_value(description["item"], *list_item(item, context), client) for item in items]
         built = [item for item in built if has_content(item)]
         return built or ([missing_slot()] if description["min_items"] and description["item"]["kind"] != "record" else [])
     if kind == "record":
@@ -350,10 +361,6 @@ def ask(prompt: str, client: LlmClient) -> JsonObject | None:
         return None
 
 
-AMENDMENT_DETAILS = "amendment_details"  # the one extraction target that is a top-level block, not a section
-M11_FORMAT_KEYS = {AMENDMENT_DETAILS: "Amendment Details"}
-
-
 def section_at(protocol: JsonObject, number: str) -> JsonObject:
     if number == AMENDMENT_DETAILS:
         return protocol[AMENDMENT_DETAILS]
@@ -369,13 +376,6 @@ def fields_of(section: JsonObject) -> JsonObject:
     return section.get("fields", section)
 
 
-def slot_at(fields: JsonObject, path: str) -> object:
-    node: object = fields
-    for part in path.split("."):
-        node = node[part]
-    return node
-
-
 def set_slot_at(fields: JsonObject, path: str, built: object) -> None:
     *parents, last = path.split(".")
     node = fields
@@ -388,8 +388,7 @@ def set_slot_at(fields: JsonObject, path: str, built: object) -> None:
 class ExpectedRow:
     """A row the table should have whenever the source mentions it; models sometimes leave such rows out."""
     name: str  # how the follow-up prompt asks for the row
-    in_source: re.Pattern[str]  # source wording that shows the protocol covers it
-    in_row: re.Pattern[str]  # matched against a row's key fields to tell whether the row is there
+    pattern: re.Pattern[str]  # matches source wording that shows the protocol covers it, and a row's key fields
 
 
 @dataclass
@@ -423,12 +422,8 @@ def extract(protocol: JsonObject, client: LlmClient, schema: JsonObject, validat
             apply_scalars(result, section, extraction, answers, context, client, validate, filled, rejected)
             kept = apply_records(result, section, extraction, answers, context, client, validate, filled, rejected)
             ask_for_missing_rows(result, section, extraction, kept, context, client, validate, filled, rejected)
-    log = result.setdefault("processing_log", [])
-    assert isinstance(log, list)
-    log.append({"step": f"extract_{extraction.label}", "actor": {"kind": "llm", "name": "converter.generate.fields",
-                "model": client.model}, "at": now_iso(),
-                "summary": f"{extraction.label}: filled {len(filled)}: {', '.join(filled) or 'none'}; "
-                           f"rejected {len(rejected)}: {', '.join(rejected) or 'none'}"})
+    log_llm_step(result, f"extract_{extraction.label}", SCRIPT_NAME, client.model,
+                 f"{extraction.label}: filled {count_and_names(filled)}; rejected {count_and_names(rejected)}")
     return result
 
 
@@ -446,14 +441,14 @@ def build_prompt(extraction: Extraction, context: Context) -> str:
 
 
 def try_apply(protocol: JsonObject, section: JsonObject, apply: Callable[[], None], context: Context,
-              client: LlmClient, validate: Validator) -> bool:
-    """Run `apply`, mark the section, validate; undo everything on errors."""
+              client: LlmClient, validate: Validator, mark_ai: bool = True) -> bool:
+    """Run `apply`, mark the section as AI-written unless `mark_ai` is off, validate; undo everything on errors."""
     snapshot = copy.deepcopy(section)
     apply()
-    mark_section_ai(section, context, client)
+    if mark_ai:
+        mark_section_ai(section, context, client)
     if validate(protocol):
-        section.clear()
-        section.update(snapshot)
+        restore(section, snapshot)
         return False
     return True
 
@@ -465,7 +460,8 @@ def apply_scalars(protocol, section, extraction, answers, context, client, valid
         answered = has_content(built)
         if not answered:
             built = mark_no_basis(built, client)
-        ok = try_apply(protocol, section, lambda: set_slot_at(fields_of(section), path, built), context, client, validate)
+        ok = try_apply(protocol, section, lambda: set_slot_at(fields_of(section), path, built), context, client,
+                       validate, mark_ai=answered)
         if answered or not ok:
             (filled if ok else rejected).append(path)
 
@@ -531,7 +527,7 @@ def missing_rows(extraction: Extraction, kept: list[object], source_text: str) -
     """Expected rows the source mentions but no kept row covers."""
     keys = [row_key_text(row, extraction.row_key_fields) for row in kept]
     return [expected for expected in extraction.expected_rows
-            if expected.in_source.search(source_text) and not any(expected.in_row.search(key) for key in keys)]
+            if expected.pattern.search(source_text) and not any(expected.pattern.search(key) for key in keys)]
 
 
 def build_gap_prompt(extraction: Extraction, expected: ExpectedRow, context: Context) -> str:
@@ -577,7 +573,7 @@ def flag_fields_not_in_source(row: JsonObject, names: object) -> None:
     for name in names:
         slot = row.get(name) if isinstance(name, str) else None
         if isinstance(slot, dict) and slot.get("status") == "filled":
-            slot["custody"]["confidence"] = "very_low"
+            slot["custody"]["confidence"] = VERY_LOW
             slot["custody"]["note"] = NOT_IN_SOURCE_NOTE
 
 
@@ -591,7 +587,7 @@ def flag_unsupported_fields(row: JsonObject, description: JsonObject, evidence: 
         if child["kind"] != "text" or not isinstance(slot, dict) or slot.get("status") != "filled":
             continue
         if not is_supported(evidence.get(name), str(slot["value"]), source_text):
-            slot["custody"]["confidence"] = "very_low"
+            slot["custody"]["confidence"] = VERY_LOW
             slot["custody"]["note"] = UNSUPPORTED_NOTE
 
 
@@ -665,13 +661,10 @@ def interventions_extraction(schema: JsonObject) -> Extraction:
 
 
 SAFETY_EXPECTED_ROWS = (
-    ExpectedRow("Pregnancy Event", re.compile(r"pregnan", re.IGNORECASE), re.compile(r"pregnan", re.IGNORECASE)),
-    ExpectedRow("Post-Partum Event", re.compile(r"post-?partum", re.IGNORECASE),
-                re.compile(r"post-?partum", re.IGNORECASE)),
-    ExpectedRow("Lactation Event", re.compile(r"breastfe|lactat", re.IGNORECASE),
-                re.compile(r"lactat|breastfe", re.IGNORECASE)),
-    ExpectedRow("Trial Intervention Complaint", re.compile(r"complaint", re.IGNORECASE),
-                re.compile(r"complaint", re.IGNORECASE)),
+    ExpectedRow("Pregnancy Event", re.compile(r"pregnan", re.IGNORECASE)),
+    ExpectedRow("Post-Partum Event", re.compile(r"post-?partum", re.IGNORECASE)),
+    ExpectedRow("Lactation Event", re.compile(r"breastfe|lactat", re.IGNORECASE)),
+    ExpectedRow("Trial Intervention Complaint", re.compile(r"complaint", re.IGNORECASE)),
 )
 
 
@@ -808,11 +801,8 @@ def extract_country_regions(protocol: JsonObject, client: LlmClient, schema: Jso
         if answers is not None and not regions and try_apply(
                 result, section, lambda: section.__setitem__("status", "not_applicable"), context, client, validate):
             filled.append(NOT_APPLICABLE_ANSWER)
-    log = result.setdefault("processing_log", [])
-    assert isinstance(log, list)
-    log.append({"step": "extract_country_regions", "actor": {"kind": "llm", "name": "converter.generate.fields",
-                "model": client.model}, "at": now_iso(),
-                "summary": f"country_regions: filled {len(filled)}: {', '.join(filled) or 'none'}"})
+    log_llm_step(result, "extract_country_regions", SCRIPT_NAME, client.model,
+                 f"country_regions: filled {count_and_names(filled)}")
     return result
 
 
@@ -881,11 +871,8 @@ def extract_objectives(protocol: JsonObject, client: LlmClient, schema: JsonObje
         objectives = [objective for objective in objectives if objective]
         if objectives and try_apply(result, section, lambda: apply_objectives(section, objectives), context, client, validate):
             filled.append(f"{kind}[{len(objectives)}]")
-    log = result.setdefault("processing_log", [])
-    assert isinstance(log, list)
-    log.append({"step": "extract_objectives", "actor": {"kind": "llm", "name": "converter.generate.fields",
-                "model": client.model}, "at": now_iso(),
-                "summary": f"objectives: filled {len(filled)}: {', '.join(filled) or 'none'}"})
+    log_llm_step(result, "extract_objectives", SCRIPT_NAME, client.model,
+                 f"objectives: filled {count_and_names(filled)}")
     return result
 
 
@@ -1027,11 +1014,8 @@ def extract_analyses(protocol: JsonObject, client: LlmClient, schema: JsonObject
         if any(analysis["status"] == "populated" for analysis in analyses) \
                 and try_apply(result, section, lambda: apply_analyses(section, analyses), context, client, validate):
             filled.append(f"{number}[{len(analyses)}]")
-    log = result.setdefault("processing_log", [])
-    assert isinstance(log, list)
-    log.append({"step": "extract_analyses", "actor": {"kind": "llm", "name": "converter.generate.fields",
-                "model": client.model}, "at": now_iso(),
-                "summary": f"analyses: filled {len(filled)}: {', '.join(filled) or 'none'}"})
+    log_llm_step(result, "extract_analyses", SCRIPT_NAME, client.model,
+                 f"analyses: filled {count_and_names(filled)}")
     return result
 
 

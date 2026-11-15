@@ -5,9 +5,7 @@ import json
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from pdf_to_cpt_docx import (
-    Figure, FrontHeading, Heading, PageMark, Paragraph, Redaction, Span, Subheading, Table,
-)
+from converter.model import REDACTION_MARK, Figure, FrontHeading, Heading, PageMark, Paragraph, Redaction, Span, Subheading, Table
 
 
 def tag(element):
@@ -28,11 +26,34 @@ def paragraph_element(block, name="p"):
         element.set("class", "caption")
     for span in block.spans:
         run = ET.SubElement(element, "span", attributes(size=span.size))
-        for enabled, name in ((span.bold, "strong"), (span.italic, "em"), (span.superscript, "sup")):
+        for enabled, tag_name in ((span.bold, "strong"), (span.italic, "em"), (span.superscript, "sup")):
             if enabled:
-                run = ET.SubElement(run, name)
+                run = ET.SubElement(run, tag_name)
         run.text = span.text
     return element
+
+
+def table_element(block):
+    table = ET.Element("table", attributes(
+        col_widths=block.col_widths, page=block.page, first_page=block.first_page,
+        padding=block.padding, height=block.height, columns=len(block.col_widths)))
+    columns = ET.SubElement(table, "colgroup")
+    for width in block.col_widths:
+        ET.SubElement(columns, "col", {"style": f"width:{width}pt"})
+    for row_index, row in enumerate(block.grid):
+        row_element = ET.SubElement(table, "tr")
+        for column, cell in enumerate(row):
+            if cell is None:
+                continue
+            metadata = {key: item for key, item in cell.items() if key != "paragraphs"}
+            cell_element = ET.SubElement(row_element, "th" if row_index == 0 else "td", {
+                "rowspan": str(cell["rowspan"]), "colspan": str(cell["colspan"]),
+                **attributes(column=column, cell=metadata),
+            })
+            if cell.get("fill"):
+                cell_element.set("style", f"background-color:#{cell['fill']}")
+            cell_element.extend(paragraph_element(paragraph) for paragraph in cell["paragraphs"])
+    return table
 
 
 def blocks_to_xhtml(blocks, assets):
@@ -53,25 +74,7 @@ def blocks_to_xhtml(blocks, assets):
         if isinstance(block, Paragraph):
             root.append(paragraph_element(block))
         elif isinstance(block, Table):
-            table = ET.SubElement(root, "table", attributes(
-                col_widths=block.col_widths, page=block.page, first_page=block.first_page,
-                padding=block.padding, height=block.height, columns=len(block.col_widths)))
-            columns = ET.SubElement(table, "colgroup")
-            for width in block.col_widths:
-                ET.SubElement(columns, "col", {"style": f"width:{width}pt"})
-            for row_index, row in enumerate(block.grid):
-                tr = ET.SubElement(table, "tr")
-                for column, cell in enumerate(row):
-                    if cell is None:
-                        continue
-                    metadata = {key: item for key, item in cell.items() if key != "paragraphs"}
-                    td = ET.SubElement(tr, "th" if row_index == 0 else "td", {
-                        "rowspan": str(cell["rowspan"]), "colspan": str(cell["colspan"]),
-                        **attributes(column=column, cell=metadata),
-                    })
-                    if cell.get("fill"):
-                        td.set("style", f"background-color:#{cell['fill']}")
-                    td.extend(paragraph_element(paragraph) for paragraph in cell["paragraphs"])
+            root.append(table_element(block))
         elif isinstance(block, Figure):
             assets.mkdir(parents=True, exist_ok=True)
             filename = "fig-" + hashlib.sha256(block.png).hexdigest() + ".png"
@@ -79,7 +82,7 @@ def blocks_to_xhtml(blocks, assets):
             ET.SubElement(root, "img", {"src": f"{assets.name}/{filename}", "alt": "Scanned source page" if block.full_page else "Source figure", **attributes(
                 width_pt=block.width_pt, page=block.page, full_page=block.full_page)})
         elif isinstance(block, Redaction):
-            ET.SubElement(root, "span", {"class": "redaction", **attributes(page=block.page)}).text = "CCI"
+            ET.SubElement(root, "span", {"class": "redaction", **attributes(page=block.page)}).text = REDACTION_MARK
         elif isinstance(block, (Subheading, FrontHeading, Heading)):
             element = ET.SubElement(root, "p", {"class": "subheading", **attributes(
                 block=type(block).__name__, kind=getattr(block, "kind", "bold"),
