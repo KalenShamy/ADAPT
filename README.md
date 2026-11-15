@@ -22,7 +22,7 @@ Options:
 
 - `--llm cli|codex|api` picks the backend (default `codex`); `--model` overrides its model.
 - `--skip-generate` stops after the pre-LLM document and makes no LLM calls.
-- `--fhir` also writes `<name>.fhir.json` from the generated JSON (not allowed with `--skip-generate`).
+- `--no-fhir` skips `<name>.fhir.json`, which is otherwise written from the generated JSON next to the docx (never written with `--skip-generate`).
 - `--template` and `--crosswalk` override the defaults.
 
 Per input, in `--out-dir`:
@@ -34,7 +34,7 @@ Per input, in `--out-dir`:
 | `<name>.pre-llm.docx` | v011 document before any LLM content |
 | `<name>.generated.json` | Protocol JSON after LLM drafting; drafted blocks have origin `ai_generated` |
 | `<name>.docx` | v011 document with LLM-drafted sections highlighted yellow |
-| `<name>.fhir.json` | With `--fhir`: FHIR document Bundle (see below) |
+| `<name>.fhir.json` | Unless `--no-fhir`: FHIR document Bundle (see below) |
 | `<name>.report.txt` | Unmatched sections and the LLM step's result |
 
 Each draft prompt carries the ICH M11 specification's user guidance for that section (`resources/research/m11_user_guidance.json`) and, for a few rationale sections, a short style excerpt from a published v011 protocol. The LLM step only drafts sections the source gives a basis for. Sections it can't support stay red `[NOT EXTRACTED]`. The report lists which sections were drafted, which had no basis, and which failed. LLM calls then read structured fields from the protocol text: the 1.1.2 Overall Design values, the section 6 interventions table, the 9.2 safety event reporting table, 12.2 country requirements (only when 12.2 is empty), 12.3 amendment history and the section 3 objectives with their estimands. Each value is highlighted and flagged for review, and answers that don't fit the schema are dropped. Where objectives are extracted, the source text they replace is removed from section 3. Dose form and route stay as the source's own words because the schema wants EDQM codes the converter can't look up. In 5.2 and 5.3, numbered criteria are renumbered as one flat list and sponsor category subheadings are dropped (the report lists them). Sections the M11 specification marks optional or conditional that are still empty after drafting are left out of `<name>.docx` and listed in the report.

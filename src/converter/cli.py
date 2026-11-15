@@ -93,7 +93,7 @@ def run_docx_validators(docx: Path, validators: dict[str, Path]) -> list[str]:
 
 def convert_file(source_path: Path, out_dir: Path, template: Path, crosswalk_path: Path,
                   backend: str | None, model: str | None, dump_context: bool = False,
-                  validators: dict[str, Path] | None = None, fhir: bool = False) -> list[str]:
+                  validators: dict[str, Path] | None = None, fhir: bool = True) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     name = source_path.stem
     assets_dir = out_dir / f"{name}.assets"
@@ -143,8 +143,8 @@ def main() -> None:
     parser.add_argument("--llm", choices=["cli", "codex", "api"], default=DEFAULT_BACKEND)
     parser.add_argument("--model", help="model name for the chosen backend")
     parser.add_argument("--skip-generate", action="store_true", help="stop after the pre-LLM docx")
-    parser.add_argument("--fhir", action="store_true",
-                        help="also write <name>.fhir.json, a FHIR document Bundle built from the generated JSON")
+    parser.add_argument("--no-fhir", action="store_true",
+                        help="skip <name>.fhir.json, the FHIR document Bundle built from the generated JSON")
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--crosswalk", type=Path, default=DEFAULT_CROSSWALK)
     parser.add_argument("--dump-context", action="store_true",
@@ -154,15 +154,13 @@ def main() -> None:
     parser.add_argument("--validate-cesharp", action="store_true",
                         help="check the output docx's CeSHarP structure via USDM (tools/validate_cesharp.py)")
     args = parser.parse_args()
-    if args.fhir and args.skip_generate:
-        parser.error("--fhir exports the generated JSON, so it needs the generate step; drop --skip-generate")
     backend = None if args.skip_generate else args.llm
     validators = {label: TOOLS / script for flag, label, script in DOCX_VALIDATORS if getattr(args, flag)}
     for path in args.inputs:
         if path.suffix.lower() not in SUPPORTED_SUFFIXES:
             raise SystemExit(f"{path}: unsupported input type {path.suffix!r}; expected .pdf or .docx")
         for line in convert_file(path, args.out_dir, args.template, args.crosswalk, backend, args.model,
-                                 args.dump_context, validators, args.fhir):
+                                 args.dump_context, validators, not args.no_fhir):
             print(line)
 
 

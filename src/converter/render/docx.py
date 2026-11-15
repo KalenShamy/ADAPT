@@ -26,7 +26,7 @@ NOT_APPLICABLE_TEXT = "Not applicable"
 LOW_CONFIDENCE_NOTE = "[AI-drafted from the source protocol. Review required.]"  # only on output with no source basis
 LOW_CONFIDENCE_TEXT_COLOR = RGBColor(0xFF, 0xFF, 0xFF)
 LOW_CONFIDENCE = "very_low"
-NO_BASIS_NOTE = "[AI draft failed; human authorship required]"
+NO_BASIS_NOTE = "[AI draft failed. Human authorship required]"
 NO_BASIS_CONFIDENCE = "none"
 AI_TABLE_FILL = "FFFF00"  # Word's yellow highlight, so generated table cells match highlighted generated text
 VALUE_COLUMN = (1,)  # label/value tables: column 0 holds the fixed M11 labels
@@ -326,6 +326,8 @@ class DocxRenderer:
                 self.low_confidence_note()
             if filled:
                 self.highlighted(filled)
+            elif any(is_no_basis_slot(slot) for slot in flat_slots(label_slots(label, fields))):
+                self.review_note(NO_BASIS_NOTE)
             elif label not in HEADING_LABELS:
                 self.placeholder(UNSPLIT_TEXT, body)
         return content
@@ -718,6 +720,12 @@ def is_no_basis(custody: object) -> bool:
         and custody.get("confidence") == NO_BASIS_CONFIDENCE
 
 
+def is_no_basis_slot(slot: JsonObject) -> bool:
+    """A missing slot the model was asked for and could not infer (origin `none` is the schema's rule for missing)."""
+    custody = slot.get("custody")
+    return slot.get("status") == "missing" and isinstance(custody, dict) and custody.get("confidence") == NO_BASIS_CONFIDENCE
+
+
 def is_low_confidence(node: object) -> bool:
     """True when any AI-written block, slot or record in `node` was written without a basis in the source."""
     if isinstance(node, list):
@@ -739,6 +747,17 @@ def label_slots(label: str, fields: JsonObject) -> list[object]:
             slot = slot.get(part, {}) if isinstance(slot, dict) else {}
         slots.append(slot)
     return slots
+
+
+def flat_slots(slots: list[object]) -> list[JsonObject]:
+    """The slot objects in `slots`, with lists of slots expanded."""
+    flat: list[JsonObject] = []
+    for slot in slots:
+        if isinstance(slot, list):
+            flat.extend(flat_slots(slot))
+        elif isinstance(slot, dict):
+            flat.append(slot)
+    return flat
 
 
 def render_docx(protocol: JsonObject, layout: dict[str, str], assets_dir: Path,

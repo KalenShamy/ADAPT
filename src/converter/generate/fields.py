@@ -191,6 +191,23 @@ def missing_slot() -> JsonObject:
     return {"value": None, "status": "missing", "custody": custody}
 
 
+def no_basis_slot(client: LlmClient) -> JsonObject:
+    """A missing slot the model was asked for and found nothing to infer it from; rendered as a note for a person.
+    The schema requires origin `none` on a missing slot, so confidence `none` carries the mark."""
+    custody = {"origin": "none", "v10_sources": [], "actor": {"kind": "llm", "name": client.name, "model": client.model},
+               "confidence": NO_BASIS_CONFIDENCE, "needs_review": True}
+    return {"value": None, "status": "missing", "custody": custody}
+
+
+def mark_no_basis(built: object, client: LlmClient) -> object:
+    """`built` (a missing slot, or a list of them) with each missing slot replaced by a no-basis slot."""
+    if isinstance(built, list):
+        return [mark_no_basis(item, client) for item in built]
+    if isinstance(built, dict) and built.get("status") == "missing":
+        return no_basis_slot(client)
+    return built
+
+
 def ai_custody(context: Context, client: LlmClient) -> JsonObject:
     return {
         "origin": "ai_transformed", "v10_sources": copy.deepcopy(context.sources),
@@ -444,13 +461,13 @@ def try_apply(protocol: JsonObject, section: JsonObject, apply: Callable[[], Non
 def apply_scalars(protocol, section, extraction, answers, context, client, validate, filled, rejected) -> None:
     for path, description in extraction.scalars.items():
         raw, answer = answer_value(answers.get(path))
-        if raw is None:
-            continue
         built = build_value(description, raw, with_confidence(context, answer), client)
-        if not has_content(built):
-            continue
+        answered = has_content(built)
+        if not answered:
+            built = mark_no_basis(built, client)
         ok = try_apply(protocol, section, lambda: set_slot_at(fields_of(section), path, built), context, client, validate)
-        (filled if ok else rejected).append(path)
+        if answered or not ok:
+            (filled if ok else rejected).append(path)
 
 
 def answered_rows(answers: JsonObject | None, name: str) -> list[object]:
@@ -619,7 +636,10 @@ def overall_design_extraction(schema: JsonObject) -> Extraction:
         f"Answer '{NOT_APPLICABLE_ANSWER}' for each of these when it does not apply. "
         "intervention_codes: the sponsor's investigational product codes; intervention_nonproprietary_names: their "
         "nonproprietary names (INN). population_diagnosis_or_condition: each condition studied, as a MedDRA preferred "
-        "term where possible, or 'N/A – Healthy' for healthy volunteers. population_age: the age limits in the "
+        "term where possible, or 'N/A – Healthy' for healthy volunteers; take it from the disease named in the "
+        "title, indication or eligibility criteria. blinded_roles: the roles kept unaware of the treatment "
+        "assignment (for example participant, investigator, outcomes assessor); when the trial is blinded but the "
+        "source names no roles, suggest the roles that blinding implies and give a low confidence. population_age: the age limits in the "
         "inclusion criteria; when they set no upper age limit, answer population_age.maximum "
         f"'{NOT_APPLICABLE_ANSWER}' and population_age.maximum_unit '{NOT_APPLICABLE_ANSWER}'. master_protocol and "
         "adaptive_trial_design: "
