@@ -23,7 +23,7 @@ def value(element, key, default):
 
 
 def paragraph_element(block, name="p"):
-    element = ET.Element(name, attributes(kind=block.kind, level=block.level, page=block.page, first_x=block.first_x))
+    element = ET.Element(name, attributes(kind=block.kind, level=block.level, page=block.page, first_x=block.first_x, align=block.align))
     if block.kind == "caption":
         element.set("class", "caption")
     for span in block.spans:
@@ -111,7 +111,8 @@ def read_paragraph(element, page):
 
     read_runs(element)
     return Paragraph(spans, value(element, "kind", "bullet" if tag(element) == "li" else "body"),
-                     value(element, "level", 0), value(element, "page", page), value(element, "first_x", 0))
+                     value(element, "level", 0), value(element, "page", page), value(element, "first_x", 0),
+                     value(element, "align", "left"))
 
 
 def xhtml_to_blocks(xhtml, assets, page=0):

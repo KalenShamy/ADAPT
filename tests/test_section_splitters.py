@@ -65,6 +65,14 @@ class AssignmentSplitTests(unittest.TestCase):
         self.assertEqual(parts[ACCOUNTABILITY_NODE], [blocks[2].text])
         self.assertEqual(parts[RANDOMIZATION_NODE], [blocks[1].text, blocks[3].text, blocks[4].text])
 
+    def test_when_randomization_happens_is_assignment(self):
+        blocks = [paragraph("All participants will be centrally assigned using IRT."),
+                  paragraph("Participants will be randomized in a 1:1 ratio after eligibility has been confirmed, "
+                            "within 3 days before Cycle 1 Day 1. Randomization will be stratified by histology.")]
+        parts = nodes_of(split_assignment(blocks))
+        self.assertEqual(parts[RANDOMIZATION_NODE], [blocks[0].text])
+        self.assertEqual(parts[ASSIGNMENT_NODE], [blocks[1].text])
+
 
 class RestructureTests(unittest.TestCase):
     outline = template_outline(DEFAULT_TEMPLATE)

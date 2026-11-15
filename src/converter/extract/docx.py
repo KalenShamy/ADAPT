@@ -24,12 +24,13 @@ from lxml.etree import _Element
 from pdf_to_cpt_docx import (
     CAPTION, COVER_HEADING, DEFAULT_CELL_PADDING, DEFAULT_TABLE_FONT_SIZE, FRONT_MATTER_HEADINGS,
     MAX_CAPTION_LENGTH, MISSING_HEADING_TITLE, SKIPPED_FRONT_MATTER, TOC_LEADER, Document, Figure, FrontHeading, Heading, PageMark,
-    Paragraph, Span, Subheading, Table, advance, canonical_label, split_at_labels, split_label, tidy_spans,
+    Paragraph, Span, Subheading, Table, advance, canonical_label, merge_split_tables, split_at_labels, split_label, tidy_spans,
 )
 
 log = logging.getLogger(__name__)
 
 TWIPS_PER_PT = 20
+ALIGNMENTS = {"center": "center", "right": "right", "end": "right"}
 EMU_PER_PT = 12700
 HALF_POINTS_PER_PT = 2
 DEFAULT_FONT_SIZE = 11.0
@@ -417,7 +418,13 @@ class Reader:
             spans.insert(0, Span(self.numbering.label(*marker) + " ", False, False, False, spans[0].size))
         elif "caption" in style_name or is_caption(text):
             kind = "caption"
-        return Paragraph(spans, kind, level, self.section)
+        return Paragraph(spans, kind, level, self.section, align=self.alignment(element, style_id))
+
+    def alignment(self, paragraph: _Element, style_id: str | None) -> str:
+        justification = paragraph.find(f"{qn('w:pPr')}/{qn('w:jc')}")
+        if justification is None:
+            justification = self.styles.lookup([style_id], "w:pPr", "w:jc")
+        return ALIGNMENTS.get(attr(justification, "val", ""), "left")
 
     def figures(self, element: _Element) -> list[Figure | Paragraph]:
         out: list[Figure | Paragraph] = []
@@ -797,8 +804,9 @@ def table_padding(table: _Element) -> tuple[float, float]:
     margins = table.find(f"{qn('w:tblPr')}/{qn('w:tblCellMar')}")
     if margins is None:
         return DEFAULT_CELL_PADDING
-    horizontal = twips_to_pt(attr(margins.find(qn("w:left")), "w")) or DEFAULT_CELL_PADDING[0]
-    vertical = twips_to_pt(attr(margins.find(qn("w:top")), "w")) or DEFAULT_CELL_PADDING[1]
+    left, top = (attr(margins.find(qn(side)), "w") for side in ("w:left", "w:top"))
+    horizontal = DEFAULT_CELL_PADDING[0] if left is None else twips_to_pt(left)  # an explicit 0 is kept
+    vertical = DEFAULT_CELL_PADDING[1] if top is None else twips_to_pt(top)
     return horizontal, vertical
 
 
@@ -957,6 +965,8 @@ def read_docx(path: Path, template: Path = DEFAULT_TEMPLATE) -> tuple[Document, 
     """
     reader = Reader(docx.Document(str(path)), template_guidance(template))
     document = reader.read()
+    for part in ("front", "body"):
+        setattr(document, part, merge_split_tables(getattr(document, part), by_repeated_header=True))
     for what, count in reader.dropped.items():
         reader.notes.append(f"dropped {count} {what}")
     for preview in reader.dropped_previews:

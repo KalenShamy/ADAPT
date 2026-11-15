@@ -41,6 +41,12 @@ ASSIGNMENT_RULES = [
 ]
 ASSIGNMENT_DEFAULT_NODE = RANDOMIZATION_NODE
 DISPENSING = re.compile(r"\b(dispens|return)", re.IGNORECASE)
+# M11 6.7.1 asks when randomisation happens relative to screening. Those sentences also name the ratio and strata,
+# which outscore them for 6.7.2 on keyword hits, so timing is checked first.
+RANDOMIZATION = re.compile(r"\brandomi[sz]", re.IGNORECASE)
+RANDOMIZATION_TIMING = re.compile(
+    r"\b(after eligibility|eligibility (has been|is|was) (confirmed|established)|relative to screening"
+    r"|(before|prior to) (cycle|day|the first dose|first dose|dosing))", re.IGNORECASE)
 
 
 @dataclass
@@ -88,8 +94,14 @@ def accountability_target(text):
     return None
 
 
+def assignment_special_target(text):
+    if RANDOMIZATION.search(text) and RANDOMIZATION_TIMING.search(text):
+        return ASSIGNMENT_NODE
+    return accountability_target(text)
+
+
 def split_assignment(blocks):
-    return split_blocks(blocks, ASSIGNMENT_RULES, ASSIGNMENT_DEFAULT_NODE, accountability_target)
+    return split_blocks(blocks, ASSIGNMENT_RULES, ASSIGNMENT_DEFAULT_NODE, assignment_special_target)
 
 
 def handling_child_target(title):

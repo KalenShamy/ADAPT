@@ -154,13 +154,23 @@ def split_objectives(blocks):
     """
     parts = {None: [], PRIMARY: [], SECONDARY: [], EXPLORATORY: []}
     current = None
-    for block in blocks:
-        if isinstance(block, Paragraph) and is_bold(block) and divider_bucket(block.text):
+    caption = None
+    for index, block in enumerate(blocks):
+        next_block = blocks[index + 1] if index + 1 < len(blocks) else None
+        if isinstance(block, Paragraph) and block.kind == "caption" and isinstance(next_block, Table):
+            caption = block  # goes with the table's first piece
+        elif isinstance(block, Paragraph) and is_bold(block) and divider_bucket(block.text):
             current = divider_bucket(block.text)
+            parts[current].append(block)
+        elif isinstance(block, Subheading) and divider_bucket(block.title):
+            current = divider_bucket(block.title)
             parts[current].append(block)
         elif isinstance(block, Table):
             for bucket, piece in table_pieces(block):
                 current = bucket or current
+                if caption:
+                    parts[current].append(caption)
+                    caption = None
                 parts[current].append(piece)
         else:
             parts[current].append(block)

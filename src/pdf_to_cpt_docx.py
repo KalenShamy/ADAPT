@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import docx
 import pymupdf
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
@@ -55,7 +56,7 @@ CELL_BULLET_INDENT_PT = 8.0  # the template bullet indent would leave narrow tab
 TABLE_PAGE_HEIGHT_SHARE = 0.84  # a one-page table may fill this much of the text height; the rest holds its caption and rows that wrap taller than the source
 FIGURE_DPI = 150
 SCANNED_PAGE_VERTICAL_ALLOWANCE = 18.0  # pt for the image paragraph's spacing and baseline
-TOC_DEPTH = 3
+TOC_DEPTH = 4
 MAX_CAPTION_LENGTH = 220
 MAX_LABEL_LENGTH = 80
 MIN_TWO_COLUMN_LABELS = 3  # label rows needed before a title page is read as label | value columns
@@ -94,6 +95,7 @@ SKIPPED_FRONT_MATTER = re.compile(r"^(table of contents|contents|list of tables|
 
 # Title-page labels seen in sponsor PDFs, mapped to a CPT field key.
 TITLE_FIELD_PATTERNS = [
+    ("confidentiality", r"(sponsor )?confidential(ity)?( statement)?"),
     ("title", r"(protocol|full|official|study|trial)?\s*title"),
     ("short_title", r"(brief|short)\s+title"),
     ("acronym", r"(trial |study )?acronym|(trial|study) name(/acronym)?"),
@@ -122,11 +124,14 @@ CPT_TITLE_LABELS = {
         "medical_monitor": "Medical Monitor Name and Contact Information:",
     },
     "v011": {
+        "confidentiality": "Sponsor Confidentiality Statement:",
         "title": "Full Title:", "short_title": "Short Title:", "acronym": "Trial Acronym:",
         "protocol_number": "Sponsor Protocol Identifier:", "amendment_number": "Amendment Identifier:",
-        "version": "Version Number:", "date": "Version Date:", "compound": "Investigational Product Code(s):",
+        "version": "Version Number:", "date": "Version Date:", "compound": "Sponsor’s Investigational Product Code(s):",
         "phase": "Trial Phase:", "sponsor": "Sponsor Name and Address:", "sponsor_address": "Sponsor Name and Address:",
-        "manufacturer": "Device Manufacturer Name and Legal Address:",
+        "manufacturer": "Device Manufacturer Name and Address:",
+        "product_names": "Investigational Product Name(s):", "co_sponsor": "Co-Sponsor Name and Address:",
+        "local_sponsor": "Local Sponsor Name and Address:",
         "regulatory_ids": "Regulatory or Clinical Trial Identifier(s):", "signatory": "Sponsor Signatory:",
         "medical_monitor": "Medical Expert Contact:",
     },
@@ -223,6 +228,7 @@ class Paragraph:
     level: int = 0
     page: int = 0
     first_x: float = 0
+    align: str = "left"  # left | center | right
 
     @property
     def text(self):
@@ -1014,6 +1020,9 @@ def canonical_label(label):
 
 # ---------------------------------------------------------------- docx output
 
+ALIGNMENTS = {"left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER, "right": WD_ALIGN_PARAGRAPH.RIGHT}
+
+
 class Writer:
     def __init__(self, template_path, version):
         self.doc = docx.Document(template_path)
@@ -1168,6 +1177,7 @@ class Writer:
             return p
         if para.kind == "caption":
             caption = self.paragraph(self.styles["caption"], para.spans)
+            caption.alignment = ALIGNMENTS[para.align]
             caption.paragraph_format.keep_with_next = True
             return caption
         return self.paragraph(self.styles["body"], para.spans)
@@ -1214,6 +1224,7 @@ class Writer:
                     p = target.paragraphs[0] if first else target.add_paragraph()
                     first = False
                     p.style = self.doc.styles[self.styles["bullet"] if para.kind == "bullet" else self.styles["table_text"]]
+                    p.alignment = ALIGNMENTS[getattr(para, "align", "left")]
                     for s in para.spans:
                         run_size = font_size if s.superscript or not s.size else s.size * scale
                         self.add_run(p, s, size=run_size)
@@ -1226,19 +1237,63 @@ class Writer:
                         p.paragraph_format.first_line_indent = Pt(-CELL_BULLET_INDENT_PT)
         for row in t.rows:
             row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
-        t.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+        for row in t.rows[:header_row_count(table.grid)]:
+            row._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+        if self.landscape:
+            self.repeat_heading_above(t)
 
-    def simple_table(self, rows):
-        """A plain bordered table of text cells; the first row is the header."""
+    def repeat_heading_above(self, table):
+        """Make the heading and caption just before a landscape table its first header rows, so they repeat on every page the table spans."""
+        titles = []
+        previous = table._tbl.getprevious()
+        while previous is not None and previous.tag == qn("w:p") and self._is_heading_or_caption(previous):
+            titles.insert(0, previous)
+            previous = previous.getprevious()
+        for title in reversed(titles):
+            self._move_into_header_row(table, title)
+
+    def _move_into_header_row(self, table, paragraph):
+        row = table.add_row()
+        table._tbl.remove(row._tr)
+        table._tbl.tblGrid.addnext(row._tr)
+        cell = row.cells[0].merge(row.cells[-1])
+        cell._tc.remove(cell.paragraphs[0]._p)
+        cell._tc.append(paragraph)
+        borders = OxmlElement("w:tcBorders")
+        for side in ("top", "left", "bottom", "right"):
+            border = OxmlElement(f"w:{side}")
+            border.set(qn("w:val"), "nil")
+            borders.append(border)
+        cell._tc.get_or_add_tcPr().append(borders)
+        properties = row._tr.get_or_add_trPr()
+        properties.append(OxmlElement("w:cantSplit"))
+        properties.append(OxmlElement("w:tblHeader"))
+
+    def _is_heading_or_caption(self, paragraph):
+        style = paragraph.find(qn("w:pPr") + "/" + qn("w:pStyle"))
+        if style is None:
+            return False
+        names = [self.doc.styles[name].style_id for name in (*self.styles["headings"], self.styles["caption"])]
+        return style.get(qn("w:val")) in names
+
+    def simple_table(self, rows, header=True, fill=None, fill_columns=None):
+        """A plain bordered table of text cells; the first row is the header unless `header` is False.
+
+        `fill` shades the body cells (not the header) of `fill_columns`, or of every column when that is None.
+        """
         t = self.doc.add_table(rows=len(rows), cols=len(rows[0]))
         self.body.remove(t._tbl)
         self.final_sect.addprevious(t._tbl)
         t.style = self.doc.styles["Table Grid"]
-        for row, texts in zip(t.rows, rows):
-            for cell, text in zip(row.cells, texts):
+        for row_index, (row, texts) in enumerate(zip(t.rows, rows)):
+            for column, (cell, text) in enumerate(zip(row.cells, texts)):
                 cell.paragraphs[0].style = self.doc.styles[self.styles["table_text"]]
                 cell.paragraphs[0].add_run(text)
-        t.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+                is_body = row_index > 0 or not header
+                if fill and is_body and (fill_columns is None or column in fill_columns):
+                    shade_cell(cell, fill)
+        if header:
+            t.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
 
     def figure(self, figure):
         width = min(figure.width_pt, self.text_width_pt)
@@ -1298,6 +1353,8 @@ class Writer:
                     clear_paragraph_text(p)
                 for tbl in list(part._element.findall(qn("w:tbl"))):
                     part._element.remove(tbl)
+                for control in list(part._element.findall(qn("w:sdt"))):  # the template's own page-number control
+                    part._element.remove(control)
             footer = section.footer
             if not footer.is_linked_to_previous:
                 p = footer.paragraphs[0]
@@ -1306,6 +1363,20 @@ class Writer:
 
     def save(self, path):
         self.doc.save(path)
+
+
+def header_row_count(grid):
+    """Leading rows whose cells are all shaded: the column headings, which repeat when the table spans pages.
+
+    At most half the rows, so a table shaded throughout still has body rows to scroll under its headings.
+    """
+    count = 0
+    for row in grid:
+        cells = [cell for cell in row if cell]
+        if not cells or not all(cell["fill"] for cell in cells):
+            break
+        count += 1
+    return max(1, min(count, len(grid) // 2))
 
 
 def table_font_size(table):
@@ -1416,24 +1487,55 @@ def join_across_pages(blocks):
     return out
 
 
-def merge_split_tables(blocks):
-    """Join a table continued on the next page (same columns, nothing in between but a page break)."""
+def merge_split_tables(blocks, by_repeated_header=False):
+    """Join a table continued on the next page (same columns, nothing in between but a page break).
+
+    A continuation may restate the table's caption and column headings; those are dropped.
+    A Word source has no page numbers, so there a continuation is recognised by its repeated header row instead.
+    """
     out = []
     for item in blocks:
         if isinstance(item, Table):
-            previous = [x for x in out if not isinstance(x, PageMark)]
-            prev = previous[-1] if previous else None
-            between = out[out.index(prev) + 1:] if prev is not None else []
-            if isinstance(prev, Table) and len(prev.col_widths) == len(item.col_widths) \
-                    and item.page == prev.page + 1 and all(isinstance(x, PageMark) for x in between):
-                rows = item.grid
-                if rows and same_row_text(rows[0], prev.grid[0]):
-                    rows = rows[1:]
-                prev.grid.extend(rows)
-                prev.page = item.page
-                continue
+            table_index = continued_table_index(out)
+            if table_index is not None:
+                prev = out[table_index]
+                continues = repeated_header_rows(prev.grid, item.grid) > 0 if by_repeated_header else item.page == prev.page + 1
+                if len(prev.col_widths) == len(item.col_widths) and continues:
+                    out[table_index + 1:] = [x for x in out[table_index + 1:] if isinstance(x, PageMark)]
+                    prev.grid.extend(item.grid[repeated_header_rows(prev.grid, item.grid):])
+                    prev.page = item.page
+                    prev.first_page = min(prev.first_page, prev.page - 1)  # spans pages, so it can't be fitted onto one
+                    continue
         out.append(item)
     return out
+
+
+def continued_table_index(out):
+    """Index of the table that the next table may continue: the last block, ignoring page marks
+    and a caption restating the one above that table."""
+    content = [index for index, block in enumerate(out) if not isinstance(block, PageMark)]
+    if content and is_restated_caption(out, content):
+        content.pop()
+    if content and isinstance(out[content[-1]], Table):
+        return content[-1]
+    return None
+
+
+def is_restated_caption(out, content):
+    """The last content block is a caption with the same text as the one just above the table before it."""
+    if len(content) < 3:
+        return False
+    caption, table, original = (out[index] for index in content[-1:-4:-1])
+    return all(isinstance(x, Paragraph) and x.kind == "caption" for x in (caption, original)) \
+        and isinstance(table, Table) and caption.text == original.text
+
+
+def repeated_header_rows(table_rows, continuation_rows):
+    """How many leading rows of the continuation repeat the table's own leading rows."""
+    count = 0
+    while count < min(len(table_rows), len(continuation_rows)) and same_row_text(continuation_rows[count], table_rows[count]):
+        count += 1
+    return count
 
 
 def collapse_redactions(blocks):
@@ -1467,10 +1569,11 @@ def write_block(writer, block):
 
 
 V011_TITLE_ORDER = [
-    "title", "acronym", "protocol_number", "version", "date", "amendment_number", "compound", "phase",
-    "sponsor", "manufacturer",
+    "confidentiality", "title", "acronym", "protocol_number", "version", "date", "amendment_number", "compound",
+    "product_names", "phase", "short_title", "sponsor", "co_sponsor", "local_sponsor", "manufacturer",
 ]
 MISSING_FIELD_VALUE = "[Not found in source protocol]"
+NOT_APPLICABLE = "Not applicable"
 REGISTRY_LABEL = re.compile(r"\b(IND|NCT|WHO|EUDAMED|EudraCT|EU CT|CTIS|ISRCTN|EU trial number)\b[\s:#]*(?:number|no\.?)?[\s:#]*([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE)
 
 
@@ -1568,7 +1671,10 @@ AMENDMENT_STATEMENTS = {
 AFTER_PROTOCOL_NUMBER = ("Original Protocol:", "original_protocol")
 AFTER_AMENDMENT_IDENTIFIER = ("Amendment Scope:", "amendment_scope")
 # M11 technical specification, title page: Conformance "Optional", so the line is deleted when the source has no value
-OPTIONAL_TITLE_KEYS = {"acronym", "version", "date", "compound", "manufacturer", "signatory", "medical_monitor"}
+OPTIONAL_TITLE_KEYS = {
+    "confidentiality", "acronym", "version", "date", "compound", "product_names", "short_title", "co_sponsor",
+    "local_sponsor", "manufacturer", "signatory", "medical_monitor",
+}
 
 
 def amendment_state(values):
@@ -1586,10 +1692,12 @@ def write_title_page(writer, values, others, notes):
     state = amendment_state(values)
     derived = {
         "original_protocol": "Yes" if state == "none" else "No",
-        # Global vs Not Global (a code list) can't be read from a v010 title page
-        "amendment_scope": "",
+        "amendment_scope": values.get("amendment_scope") or (NOT_APPLICABLE if state == "none" else MISSING_FIELD_VALUE),
     }
-    extra_after = {"protocol_number": AFTER_PROTOCOL_NUMBER, "amendment_number": AFTER_AMENDMENT_IDENTIFIER}
+    # An original protocol has no Amendment Number line, but M11 still requires the Amendment Scope heading
+    extra_after = {"protocol_number": [AFTER_PROTOCOL_NUMBER]}
+    scope_anchor = "protocol_number" if state == "none" else "amendment_number"
+    extra_after.setdefault(scope_anchor, []).append(AFTER_AMENDMENT_IDENTIFIER)
 
     def field(label, text):
         writer.paragraph(styles["field_label"], text=label)
@@ -1608,20 +1716,19 @@ def write_title_page(writer, values, others, notes):
             notes.append(f"title page: {labels[key]} not found in source")
         # a code-list field can't hold the placeholder
         field(labels[key], value or ("" if key == "phase" else MISSING_FIELD_VALUE))
-        if key in extra_after:
-            label, derived_key = extra_after[key]
+        for label, derived_key in extra_after.get(key, []):
             field(label, derived[derived_key])
     rows = [(M11_IDENTIFIER_NAMES.get(label, OTHER_IDENTIFIER_NAME), identifier)
             for label, identifier in registry_rows(values.get("regulatory_ids", ""))]
+    field(labels["regulatory_ids"], "" if rows else MISSING_FIELD_VALUE)
     if rows:
-        field(labels["regulatory_ids"], "")
-        writer.simple_table([("Label", "ID")] + rows)
+        writer.simple_table(rows, header=False)
     else:
         notes.append("title page: regulatory identifiers not found in source")
+    field("Sponsor Approval:", values.get("sponsor_approval") or values.get("date") or MISSING_FIELD_VALUE)
     for key in ("signatory", "medical_monitor"):
         if values.get(key):
             field(labels[key], values[key])
-    field("Sponsor Approval:", values.get("date") or MISSING_FIELD_VALUE)
     field("Amendment Details", AMENDMENT_STATEMENTS[state])
     for label, value in others:
         if label:
