@@ -7,13 +7,17 @@ each block's `source_index`, which for PDF input is the block's position in the 
 import copy
 import hashlib
 import json
+import re
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
 from block_xhtml import blocks_to_xhtml
-from pdf_to_cpt_docx import Figure, PageMark, Paragraph, Redaction, Span, Table
+from pdf_to_cpt_docx import MAX_CAPTION_LENGTH, Figure, PageMark, Paragraph, Redaction, Span, Table
 from converter.criteria import fill_criteria
+from converter.generate.guidance import template_sections
+from converter.parts import tag_collection_parts
 from cross_references import rewrite_cross_references
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, TitlePageFiller, collect
 from restructure import Subheading, front_parts, iter_blocks, iter_nodes, restructure
@@ -42,6 +46,9 @@ M11_HEADINGS = {
     "10.5": "Analyses Associated with the Secondary Objective(s)",
 }
 PLACEHOLDER_TITLE = "x"  # what the skeleton builder writes for free-text titles
+# First cells of the v010 6.1 "Study Intervention(s) Administered" and "Study Arm(s)" tables
+INTERVENTION_TABLE_LABELS = ("Intervention Label", "Arm Title")
+SOURCE_TABLE_CAPTION = re.compile(r"^Table\s+([\dA-Z][\w.\-]*?)[.:]?\s+(\S.*)", re.DOTALL)  # label, title
 
 
 def now_iso() -> str:
@@ -170,6 +177,17 @@ def find_section(skeleton: JsonObject, number: str) -> JsonObject | None:
     return node
 
 
+def fill_placeholder_titles(sections: JsonObject) -> None:
+    """Sections the source has no heading for keep the skeleton's "x"; give them the M11 template's title."""
+    templates = template_sections()
+    for number, section in sections.items():
+        if section.get("title") == PLACEHOLDER_TITLE and number in templates:
+            section["title"] = templates[number]["title"]
+        children = section.get("subsections")
+        if isinstance(children, dict):
+            fill_placeholder_titles(children)
+
+
 def allowed_statuses(schema: JsonObject, number: str) -> list[str]:
     definition = schema["$defs"].get("Section_" + number.replace(".", "_"), {})
     return definition.get("properties", {}).get("status", {}).get("enum", [])
@@ -194,9 +212,75 @@ def place_node(protocol: JsonObject, schema: JsonObject, placer: Placer, node, t
         else:
             held = copy.copy(node)
             held.from_template = False
+            held.children = []  # placed below in their own sections
             section["additional_subsections"].append(placer.additional_subsection(held, template_number))
     for child in node.children:
         place_node(protocol, schema, placer, child, section)
+
+
+def content_custody(blocks: list[JsonObject]) -> JsonObject:
+    return custody("v10_derived", merge_sources(block["custody"]["v10_sources"] for block in blocks))
+
+
+def is_table_caption(block: JsonObject) -> bool:
+    """A 'Table 3. Title' line, by the extractors' caption rule: short, and no sentence break after the label."""
+    if block.get("type") != "paragraph":
+        return False
+    text = str(block["text"]).strip()
+    match = SOURCE_TABLE_CAPTION.match(text)
+    return bool(match) and len(text) <= MAX_CAPTION_LENGTH and ". " not in match.group(2)[:-1]
+
+
+def captioned_tables(node: object) -> Iterator[tuple[JsonObject, JsonObject]]:
+    """(caption paragraph, table) for each source caption that sits right above its table, anywhere under `node`."""
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from captioned_tables(value)
+    elif isinstance(node, list):
+        for above, item in zip(node, node[1:]):
+            if is_table_block(item) and isinstance(above, dict) and is_table_caption(above):
+                yield above, item
+        for item in node:
+            yield from captioned_tables(item)
+
+
+def is_table_block(node: object) -> bool:
+    return isinstance(node, dict) and node.get("type") == "table" and "custody" in node
+
+
+def is_intervention_table(block: JsonObject) -> bool:
+    if block["type"] != "table" or not block["rows"] or not block["rows"][0]:
+        return False
+    return block["rows"][0][0].strip() in INTERVENTION_TABLE_LABELS
+
+
+def move_intervention_tables(protocol: JsonObject) -> list[str]:
+    """M11 puts the trial interventions overview table under 6; v010 held its intervention and arm tables in 6.1."""
+    section = protocol["sections"]["6"]
+    description = section["subsections"]["6.1"]
+    content = description["content"]
+    moved_indices: set[int] = set()
+    for index, block in enumerate(content):
+        if not is_intervention_table(block):
+            continue
+        moved_indices.add(index)
+        caption = content[index - 1] if index > 0 else None
+        if caption and is_table_caption(caption):
+            moved_indices.add(index - 1)
+    if not moved_indices:
+        return []
+    moved = [block for index, block in enumerate(content) if index in moved_indices]
+    description["content"] = [block for index, block in enumerate(content) if index not in moved_indices]
+    section["content"] = [*section["content"], *moved]
+    section["status"] = "populated"
+    section["custody"] = content_custody(section["content"])
+    remaining = description["content"] or description["additional_subsections"]
+    if remaining:
+        description["custody"] = content_custody(remaining)
+    else:
+        description["status"] = "missing"
+        description["custody"] = custody("none", [])
+    return [f"Intervention tables moved from 6.1 to 6: {len(moved)} blocks"]
 
 
 FRONT_SECTION_ID = "v10:front.unmapped"
@@ -270,6 +354,7 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
             section["title"] = M11_HEADINGS[heading.number]
         elif section.get("title") == PLACEHOLDER_TITLE:
             section["title"] = heading.title
+    fill_placeholder_titles(protocol["sections"])
     placer = Placer(assets_dir, result.landscape_pages)
     for root in result.nodes:
         place_node(protocol, schema, placer, root, None)
@@ -279,6 +364,8 @@ def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outl
         unplaced_front(placer, result.front + result.amendment_details) + unplaced_title_fields(placer, other_fields)
     )
     result.report.notes.extend(fill_criteria(protocol))
+    result.report.notes.extend(tag_collection_parts(protocol))
+    result.report.notes.extend(move_intervention_tables(protocol))
     protocol["processing_log"] = [{
         "step": "place", "actor": copy.deepcopy(SCRIPT_ACTOR), "at": now_iso(),
         "summary": f"placed {placer.next_index} blocks from {pdf_path.name}",

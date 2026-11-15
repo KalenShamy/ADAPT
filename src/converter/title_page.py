@@ -8,8 +8,8 @@ from pathlib import Path
 import pymupdf
 
 from pdf_to_cpt_docx import (
-    COVER_HEADING, ELECTRONIC_SIGNATURE_VALUE, Heading, Paragraph, Table, canonical_label, collect_title_values,
-    join_sponsor, registry_rows,
+    COVER_HEADING, ELECTRONIC_SIGNATURE_VALUE, SAME_ROW_TOLERANCE, Heading, Paragraph, Table, canonical_label,
+    collect_title_values, join_sponsor, registry_rows,
 )
 
 type JsonObject = dict[str, object]
@@ -20,6 +20,10 @@ TITLE_EMPTY_LABELS = re.compile(r"^(Clinical Scientist|Medical\s*/?Study Directo
 PDF_SUFFIX = ".pdf"
 MAX_ACRONYM_CHARS = 14
 MAX_SHORT_TITLE_CHARS = 300
+CONFIDENTIALITY_WORDS = re.compile(r"\b(confidential|proprietary)\b", re.IGNORECASE)
+CONFIDENTIALITY_LABEL = re.compile(r"^(?:sponsor\s+)?confidential(?:ity)?(?:\s+statement)?:?\s*", re.IGNORECASE)
+MIN_STATEMENT_LINE_CHARS = 40  # shorter lines with the word are banners like "CONFIDENTIAL"
+STATEMENT_LINE_GAP = 0.5  # a gap between lines above this share of the line height ends the statement
 TITLE_PAGE_UNMAPPED_ID = "v10:title_page.unmapped"
 DATE_FORMATS = ["%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%m/%d/%Y"]
 ROMAN_PHASES = {"I": "1", "II": "2", "III": "3", "IV": "4"}
@@ -58,6 +62,42 @@ def first_two_pages(path: Path) -> tuple[list[str], list[str]]:
         lines = [line.strip() for line in pdf[0].get_text().splitlines() if line.strip()]
         second_page_lines = [line.strip() for line in pdf[1].get_text().splitlines()] if len(pdf) > 1 else []
     return lines, second_page_lines
+
+
+def text_rows(page) -> list[tuple[float, float, str]]:
+    """(top, bottom, text) of each visual row on a PDF page, top to bottom."""
+    lines = sorted(
+        (line["bbox"][1], line["bbox"][3], line["bbox"][0], "".join(span["text"] for span in line["spans"]).strip())
+        for block in page.get_text("dict")["blocks"] for line in block.get("lines", []))
+    rows: list[list] = []
+    for top, bottom, _, text in lines:
+        if not text:
+            continue
+        if rows and abs(top - rows[-1][0]) < SAME_ROW_TOLERANCE:
+            rows[-1][1] = max(rows[-1][1], bottom)
+            rows[-1][2] += " " + text
+        else:
+            rows.append([top, bottom, text])
+    return [(top, bottom, text) for top, bottom, text in rows]
+
+
+def is_confidentiality_statement(text: str) -> bool:
+    return len(text) >= MIN_STATEMENT_LINE_CHARS and bool(CONFIDENTIALITY_WORDS.search(text))
+
+
+def confidentiality_statement(path: Path) -> str | None:
+    """The first-page paragraph that starts with a line about confidentiality, without a 'Confidential:' lead-in."""
+    with pymupdf.open(path) as pdf:
+        rows = text_rows(pdf[0])
+    start = next((index for index, (_, _, text) in enumerate(rows) if is_confidentiality_statement(text)), None)
+    if start is None:
+        return None
+    lines = [rows[start][2]]
+    for (_, previous_bottom, _), (top, bottom, text) in zip(rows[start:], rows[start + 1:]):
+        if top - previous_bottom > STATEMENT_LINE_GAP * (bottom - top):
+            break
+        lines.append(text)
+    return CONFIDENTIALITY_LABEL.sub("", " ".join(lines))
 
 
 def add_amendment_from_version(values: dict[str, str]) -> None:
@@ -190,6 +230,14 @@ def synopsis_title(document, values, notes):
 
 def finish_title(values: dict[str, str], others: list[tuple[str | None, str]], notes: list[str] | None = None) -> None:
     """Fold fallback fields into their slots and drop extras that repeat a mapped value."""
+    if not values.get("confidentiality"):
+        statement = next((value for label, value in others if not label and is_confidentiality_statement(value)), None)
+        if statement:
+            values["confidentiality"] = CONFIDENTIALITY_LABEL.sub("", statement)
+            others[:] = [(label, value) for label, value in others if value != statement]
+    if values.get("confidentiality"):
+        others[:] = [(label, value) for label, value in others
+                     if label or not CONFIDENTIALITY_LABEL.fullmatch(value.strip())]
     primary = values.pop("primary_intervention", None)
     if primary and not values.get("compound"):
         values["compound"] = primary
@@ -242,7 +290,7 @@ class TitlePageFiller:
     def fill(self, values: dict[str, str]) -> None:
         page = self.page
         text_fields = {
-            "title": "full_title", "protocol_number": "sponsor_protocol_identifier",
+            "confidentiality": "sponsor_confidentiality_statement", "title": "full_title", "protocol_number": "sponsor_protocol_identifier",
             "amendment_number": "amendment_identifier", "version": "version_number",
             "medical_monitor": "medical_expert_contact",
         }
@@ -291,7 +339,7 @@ def render_values(title_page: JsonObject) -> dict[str, str]:
     """Title page slots back to the {key: text} dict that write_title_page expects."""
     values: dict[str, str] = {}
     single = {
-        "title": "full_title", "protocol_number": "sponsor_protocol_identifier",
+        "confidentiality": "sponsor_confidentiality_statement", "title": "full_title", "protocol_number": "sponsor_protocol_identifier",
         "amendment_number": "amendment_identifier", "version": "version_number", "acronym": "trial_acronym",
         "short_title": "short_title", "date": "version_date", "phase": "trial_phase",
         "medical_monitor": "medical_expert_contact",
@@ -303,18 +351,52 @@ def render_values(title_page: JsonObject) -> dict[str, str]:
     codes = [slot_text(slot) for slot in title_page.get("investigational_product_codes", [])]
     if any(codes):
         values["compound"] = "; ".join(code for code in codes if code)
-    for key, field in (("sponsor", "sponsors"), ("manufacturer", "device_manufacturers")):
-        names = [slot_text(item["name"]) for item in title_page.get(field, [])]
+    for key, role in (("sponsor", "sponsor"), ("co_sponsor", "co_sponsor"), ("local_sponsor", "local_sponsor")):
+        names = [slot_text(item["name"]) for item in title_page.get("sponsors", []) if item.get("role", "sponsor") == role]
         if any(names):
             values[key] = "; ".join(name for name in names if name)
+    manufacturers = [slot_text(item["name"]) for item in title_page.get("device_manufacturers", [])]
+    if any(manufacturers):
+        values["manufacturer"] = "; ".join(name for name in manufacturers if name)
+    product_names = [slot_text(item["name"]) for item in title_page.get("investigational_product_names", [])]
+    if any(product_names):
+        values["product_names"] = "\n".join(name for name in product_names if name)
     ids = [f"{item['label']}: {slot_text(item['id'])}" for item in title_page.get("regulatory_identifiers", [])
            if slot_text(item["id"])]
     if ids:
         values["regulatory_ids"] = "; ".join(ids)
-    signatories = [slot_text(item["name"]) for item in title_page.get("sponsor_signatories", [])]
+    signatories = [signatory_text(item) for item in title_page.get("sponsor_signatories", [])]
     if any(signatories):
-        values["signatory"] = "; ".join(name for name in signatories if name)
+        values["signatory"] = "\n".join(signatory for signatory in signatories if signatory)
+    scope = amendment_scope_text(title_page)
+    if scope:
+        values["amendment_scope"] = scope
+    approval_slot = title_page.get("sponsor_approval", {})
+    approval_value = approval_slot.get("value")
+    approval = slot_text(approval_slot) or (
+        str(approval_value.get("date") or approval_value.get("text")) if isinstance(approval_value, dict) else "")
+    if approval:
+        values["sponsor_approval"] = approval
     return values
+
+
+def signatory_text(signatory: JsonObject) -> str:
+    """One signatory on one line: name, title, date."""
+    parts = [slot_text(signatory[key]) for key in ("name", "title", "date")]
+    return ", ".join(part for part in parts if part)
+
+
+def amendment_scope_text(title_page: JsonObject) -> str:
+    """'Global', or 'Not Global' followed by the countries, regions or sites it applies to."""
+    slot = title_page.get("amendment_scope", {})
+    value = slot.get("value")
+    scope = value["decode"] if isinstance(value, dict) else slot_text(slot)
+    identifiers = []
+    for identifier in title_page.get("amendment_scope_identifiers", []):
+        target = identifier.get("site") or identifier.get("country_or_region", {})
+        target_value = target.get("value")
+        identifiers.append(target_value["decode"] if isinstance(target_value, dict) else slot_text(target))
+    return ", ".join(part for part in [scope, *identifiers] if part)
 
 
 def collect(document, source_path) -> tuple[dict[str, str], list[tuple[str | None, str]]]:
@@ -322,5 +404,9 @@ def collect(document, source_path) -> tuple[dict[str, str], list[tuple[str | Non
     values, others = collect_title_values(document, notes)
     synopsis_title(document, values, notes)
     enrich_title(source_path, values, others, notes)
+    if Path(source_path).suffix.lower() == PDF_SUFFIX and not values.get("confidentiality"):
+        statement = confidentiality_statement(source_path)
+        if statement:
+            values["confidentiality"] = statement
     finish_title(values, others)
     return values, others

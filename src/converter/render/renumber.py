@@ -10,6 +10,8 @@ from cross_references import OTHER_DOCUMENT, REFERENCE, block_paragraphs, list_n
 from pdf_to_cpt_docx import advance
 
 NUMBER_PART = re.compile(r"^[\d.]+")
+# Schema sections with no number of their own that the CPT template still styles as a numbered Heading 4
+NUMBERED_TITLES_WITHOUT_M11_NUMBER = {"Time Period for Detecting Medical Device Deficiencies"}
 
 type JsonObject = dict[str, object]
 Edit = tuple[int, int, str]
@@ -23,6 +25,11 @@ def ordered_children(section: JsonObject) -> list[JsonObject]:
     return [*ordered, *analyses]
 
 
+def is_sub_label(section: JsonObject) -> bool:
+    """An M11 unnumbered heading (9.2.2 Recording): written as a label that takes no heading number."""
+    return not section.get("number") and section.get("title") not in NUMBERED_TITLES_WITHOUT_M11_NUMBER
+
+
 def natural_key(key: str) -> tuple[int, ...]:
     match = NUMBER_PART.match(key)
     return tuple(int(part) for part in match.group(0).split(".") if part) if match else ()
@@ -34,10 +41,10 @@ def displayed_numbers(sections: JsonObject) -> dict[str, str]:
     shifted: dict[str, str] = {}
 
     def visit(section: JsonObject, level: int) -> None:
-        if section["status"] == "omitted":
+        if section["status"] == "omitted" or is_sub_label(section):
             return
-        shown = advance(counters, level)
         number = section.get("number")
+        shown = advance(counters, level)
         if number and str(number) != shown:
             shifted[str(number)] = shown
         for child in ordered_children(section):

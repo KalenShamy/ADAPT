@@ -31,6 +31,10 @@ class TitlePageSlotTests(unittest.TestCase):
         self.assertEqual(values["regulatory_ids"], "NCT: NCT0123")
         self.assertNotIn("sponsor", values)
 
+    def test_render_values_include_the_confidentiality_statement(self):
+        page = {"sponsor_confidentiality_statement": {"value": "Property of the sponsor.", "status": "filled"}}
+        self.assertEqual(render_values(page)["confidentiality"], "Property of the sponsor.")
+
 
 if __name__ == "__main__":
     unittest.main()

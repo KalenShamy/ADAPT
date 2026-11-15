@@ -85,6 +85,33 @@ class SponsorTests(unittest.TestCase):
         self.assertEqual(values["sponsor"], "Bayer AG, 51368 Leverkusen, Germany")
 
 
+class ConfidentialityTests(unittest.TestCase):
+    STATEMENT = "This submission contains confidential and proprietary commercial information and/or trade secrets."
+
+    def test_confidentiality_labels_map_to_the_statement(self):
+        for label in ("Confidential:", "Sponsor Confidentiality Statement:", "Confidentiality Statement"):
+            self.assertEqual(canonical_label(label), "confidentiality", label)
+
+    def test_labeled_statement_is_kept(self):
+        values, others, _ = collect_from_pairs([["Confidential:", self.STATEMENT]])
+        self.assertEqual(values["confidentiality"], self.STATEMENT)
+        self.assertEqual(others, [])
+
+    def test_unlabeled_statement_moves_out_of_the_extra_fields(self):
+        values = {}
+        others = [(None, "Confidential"), (None, self.STATEMENT), (None, "Based on TMF-1 Protocol v5.0.")]
+        finish_title(values, others, [])
+        self.assertEqual(values["confidentiality"], self.STATEMENT)
+        self.assertEqual(others, [(None, "Based on TMF-1 Protocol v5.0.")])
+
+    def test_confidential_banner_alone_is_not_a_statement(self):
+        values = {}
+        others = [(None, "CONFIDENTIAL")]
+        finish_title(values, others, [])
+        self.assertNotIn("confidentiality", values)
+        self.assertEqual(others, [(None, "CONFIDENTIAL")])
+
+
 class FinishTitleTests(unittest.TestCase):
     def test_extras_repeating_mapped_values_and_cover_headings_are_dropped(self):
         values = {"short_title": "A short study title", "primary_intervention": "Drug X"}
@@ -178,7 +205,7 @@ class WrittenTitlePageTests(unittest.TestCase):
         body = list(writer.body)
         table_index = next(index for index, element in enumerate(body) if element.tag == qn("w:tbl"))
         next_text = "".join(node.text or "" for node in body[table_index + 1].iter(qn("w:t")))
-        self.assertEqual(next_text, "Sponsor Signatory:")
+        self.assertEqual(next_text, "Sponsor Approval:")
         label_text = "".join(node.text or "" for node in body[table_index - 1].iter(qn("w:t")))
         self.assertEqual(label_text, "Regulatory or Clinical Trial Identifier(s):")
 
@@ -209,17 +236,28 @@ class M11TitlePageTests(unittest.TestCase):
 
     def test_optional_fields_are_omitted_when_the_source_has_no_value(self):
         texts = self.written_texts({"protocol_number": "A1"})
-        for label in ("Trial Acronym:", "Version Number:", "Version Date:", "Amendment Identifier:", "Amendment Scope:",
-                      "Investigational Product Code(s):", "Device Manufacturer Name and Legal Address:",
-                      "Regulatory or Clinical Trial Identifier(s):", "Sponsor Signatory:", "Medical Expert Contact:"):
+        for label in ("Trial Acronym:", "Version Number:", "Version Date:", "Amendment Identifier:",
+                      "Sponsor’s Investigational Product Code(s):", "Device Manufacturer Name and Address:",
+                      "Short Title:", "Investigational Product Name(s):", "Co-Sponsor Name and Address:", "Local Sponsor Name and Address:",
+                      "Sponsor Signatory:", "Medical Expert Contact:"):
             self.assertNotIn(label, texts)
-        for label in ("Full Title:", "Sponsor Protocol Identifier:", "Original Protocol:", "Trial Phase:", "Sponsor Approval:"):
+        for label in ("Full Title:", "Sponsor Protocol Identifier:", "Original Protocol:", "Trial Phase:", "Sponsor Approval:",
+                      "Amendment Scope:", "Regulatory or Clinical Trial Identifier(s):"):
             self.assertIn(label, texts)
 
     def test_optional_fields_are_written_when_the_source_has_them(self):
         texts = self.written_texts({"acronym": "ABC", "version": "2", "date": "1 Jan 2025", "amendment_number": "01"})
         for label in ("Trial Acronym:", "Version Number:", "Version Date:", "Amendment Identifier:", "Amendment Scope:"):
             self.assertIn(label, texts)
+
+    def test_confidentiality_statement_is_the_first_field(self):
+        texts = self.written_texts({"confidentiality": "Property of the sponsor.", "title": "A trial"})
+        page_title = texts.index("Title Page")
+        self.assertEqual(texts[page_title + 1:page_title + 4],
+                         ["Sponsor Confidentiality Statement:", "Property of the sponsor.", "Full Title:"])
+
+    def test_confidentiality_statement_is_omitted_when_the_source_has_none(self):
+        self.assertNotIn("Sponsor Confidentiality Statement:", self.written_texts({"title": "A trial"}))
 
     def test_missing_phase_is_left_blank_not_a_placeholder(self):
         texts = self.written_texts({})
