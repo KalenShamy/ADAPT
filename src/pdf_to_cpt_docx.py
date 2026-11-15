@@ -1567,6 +1567,8 @@ AMENDMENT_STATEMENTS = {
 # Title-page fields M11 requires after the slot fields the template order covers
 AFTER_PROTOCOL_NUMBER = ("Original Protocol:", "original_protocol")
 AFTER_AMENDMENT_IDENTIFIER = ("Amendment Scope:", "amendment_scope")
+# M11 technical specification, title page: Conformance "Optional", so the line is deleted when the source has no value
+OPTIONAL_TITLE_KEYS = {"acronym", "version", "date", "compound", "manufacturer", "signatory", "medical_monitor"}
 
 
 def amendment_state(values):
@@ -1597,6 +1599,11 @@ def write_title_page(writer, values, others, notes):
     writer.paragraph(styles["page_title"], text="Title Page")
     for key in V011_TITLE_ORDER:
         value = values.get(key)
+        # Conformance "Conditional: when there is an amendment"
+        if key == "amendment_number" and state == "none":
+            continue
+        if not value and key in OPTIONAL_TITLE_KEYS:
+            continue
         if not value:
             notes.append(f"title page: {labels[key]} not found in source")
         # a code-list field can't hold the placeholder
@@ -1604,15 +1611,16 @@ def write_title_page(writer, values, others, notes):
         if key in extra_after:
             label, derived_key = extra_after[key]
             field(label, derived[derived_key])
-    field(labels["regulatory_ids"], "")
     rows = [(M11_IDENTIFIER_NAMES.get(label, OTHER_IDENTIFIER_NAME), identifier)
             for label, identifier in registry_rows(values.get("regulatory_ids", ""))]
-    if not rows:
+    if rows:
+        field(labels["regulatory_ids"], "")
+        writer.simple_table([("Label", "ID")] + rows)
+    else:
         notes.append("title page: regulatory identifiers not found in source")
-        rows = [("", MISSING_FIELD_VALUE)]
-    writer.simple_table([("Label", "ID")] + rows)
-    field(labels["signatory"], values.get("signatory") or MISSING_FIELD_VALUE)
-    field(labels["medical_monitor"], values.get("medical_monitor") or MISSING_FIELD_VALUE)
+    for key in ("signatory", "medical_monitor"):
+        if values.get(key):
+            field(labels[key], values[key])
     field("Sponsor Approval:", values.get("date") or MISSING_FIELD_VALUE)
     field("Amendment Details", AMENDMENT_STATEMENTS[state])
     for label, value in others:

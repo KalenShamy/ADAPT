@@ -174,7 +174,7 @@ class TitlePageBoundaryTests(unittest.TestCase):
 class WrittenTitlePageTests(unittest.TestCase):
     def test_identifier_table_is_followed_by_the_next_label_not_an_empty_paragraph(self):
         writer = Writer(str(DEFAULT_TEMPLATE), "v011")
-        write_title_page(writer, {"regulatory_ids": "EU CT: 2025-524392-23-00; IND: 105379"}, [], [])
+        write_title_page(writer, {"regulatory_ids": "EU CT: 2025-524392-23-00; IND: 105379", "signatory": "Dr A"}, [], [])
         body = list(writer.body)
         table_index = next(index for index, element in enumerate(body) if element.tag == qn("w:tbl"))
         next_text = "".join(node.text or "" for node in body[table_index + 1].iter(qn("w:t")))
@@ -206,6 +206,20 @@ class M11TitlePageTests(unittest.TestCase):
         self.assertEqual(first[first.index("Amendment Details") + 1], "This is the first protocol amendment.")
         later = self.written_texts({"amendment_number": "Amendment 3"})
         self.assertTrue(later[later.index("Amendment Details") + 1].startswith("This protocol has been amended previously."))
+
+    def test_optional_fields_are_omitted_when_the_source_has_no_value(self):
+        texts = self.written_texts({"protocol_number": "A1"})
+        for label in ("Trial Acronym:", "Version Number:", "Version Date:", "Amendment Identifier:", "Amendment Scope:",
+                      "Investigational Product Code(s):", "Device Manufacturer Name and Legal Address:",
+                      "Regulatory or Clinical Trial Identifier(s):", "Sponsor Signatory:", "Medical Expert Contact:"):
+            self.assertNotIn(label, texts)
+        for label in ("Full Title:", "Sponsor Protocol Identifier:", "Original Protocol:", "Trial Phase:", "Sponsor Approval:"):
+            self.assertIn(label, texts)
+
+    def test_optional_fields_are_written_when_the_source_has_them(self):
+        texts = self.written_texts({"acronym": "ABC", "version": "2", "date": "1 Jan 2025", "amendment_number": "01"})
+        for label in ("Trial Acronym:", "Version Number:", "Version Date:", "Amendment Identifier:", "Amendment Scope:"):
+            self.assertIn(label, texts)
 
     def test_missing_phase_is_left_blank_not_a_placeholder(self):
         texts = self.written_texts({})
