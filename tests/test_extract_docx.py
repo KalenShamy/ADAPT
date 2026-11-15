@@ -285,6 +285,19 @@ class ExtractDocxTests(unittest.TestCase):
         self.assertEqual(cell_texts, ["outer", "inner one", "inner two"])
         self.assertTrue(any("1 equations flattened" in n for n in notes))
 
+    def test_text_typed_in_a_symbol_font_becomes_unicode(self) -> None:
+        document = new_document()
+        with_body_start(document)
+        symbol = '<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr>'
+        self.add_xml_paragraph(
+            document,
+            f'<w:r><w:t xml:space="preserve">ALT </w:t></w:r><w:r>{symbol}<w:t>\u00b3</w:t></w:r>'
+            f'<w:r><w:t xml:space="preserve"> 3 x ULN, </w:t></w:r><w:r>{symbol}<w:t xml:space="preserve">\uf0b3 2 m\u2265</w:t></w:r>')
+        result, _ = self.load(document)
+        text = next(b for b in result.body if isinstance(b, Paragraph))
+        # Single-byte and U+F0xx codes go through the Symbol table (m is mu); real Unicode stays.
+        self.assertEqual(text.text, "ALT \u2265 3 x ULN, \u2265 2 \u03bc\u2265")
+
     def test_unconvertible_image_bytes_are_kept(self) -> None:
         document = new_document()
         with_body_start(document)

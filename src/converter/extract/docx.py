@@ -52,6 +52,7 @@ NOTE_SEPARATOR_TYPES = ("separator", "continuationSeparator", "continuationNotic
 NOTE_NUMBER_FORMATS = {"footnote": "decimal", "endnote": "lowerRoman"}  # Word's defaults
 FIGURE_MARKER = "[Figure]"
 SYMBOL_GLYPH_MASK = 0xFF  # symbol fonts keep their glyphs at 0xF0xx in the private-use area
+SYMBOL_PRIVATE_USE_START = 0xF000
 HEX_BASE = 16
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -319,13 +320,15 @@ class Reader:
             elif child.tag.startswith(f"{{{MATH_NS}}}") and name not in MATH_PROPERTY_ELEMENTS:
                 yield from self.runs(child)  # equations are read as their text, in order
 
-    def run_text(self, run: _Element) -> str:
+    def run_text(self, run: _Element, style_ids: list[str | None]) -> str:
         parts = []
+        font = self.symbol_font(run, style_ids)
         for child in run:
             name = local(child)
             if name == "t":
                 if child not in self.hidden_text:
-                    parts.append(child.text or "")
+                    text = child.text or ""
+                    parts.append(self.symbol_font_text(text, font) if font else text)
             elif name in ("tab", "br", "cr"):
                 parts.append(" ")
             elif name == "noBreakHyphen":
@@ -338,6 +341,37 @@ class Reader:
                     char = f"[symbol {label}]"
                 parts.append(char)
         return "".join(parts)
+
+    def symbol_font(self, run: _Element, style_ids: list[str | None]) -> str | None:
+        """"Symbol" or "Wingdings…" when the run's text is set in a symbol font, else None."""
+        run_style = attr(run.find(f"{qn('w:rPr')}/{qn('w:rStyle')}"), "val")
+        fonts = run.find(f"{qn('w:rPr')}/{qn('w:rFonts')}")
+        if fonts is None:
+            fonts = self.styles.lookup([run_style, *style_ids], "w:rPr", "w:rFonts")
+        font = attr(fonts, "ascii") or attr(fonts, "hAnsi") or ""
+        return font if font.casefold() == "symbol" or font.casefold().startswith("wingdings") else None
+
+    def symbol_font_text(self, text: str, font: str) -> str:
+        """Text typed in a symbol font, as the Unicode characters it shows (Symbol "³" is "≥").
+
+        Only one-byte and U+F0xx code points are glyph codes; real Unicode (an author's "≥") stays as it is.
+        Plain ASCII keeps its meaning in Symbol (digits, punctuation), so it stays; anything else
+        without a mapping is labelled like an unmapped w:sym.
+        """
+        out = []
+        for char in text:
+            if not is_symbol_glyph_code(ord(char)):
+                out.append(char)
+                continue
+            mapped = symbol_font_char(font, ord(char))
+            if mapped is None and font.casefold() == "symbol" and char.isascii():
+                mapped = char
+            if mapped is None:
+                label = f"{font} U+{ord(char):04X}"
+                self.unmapped_symbols.add(label)
+                mapped = f"[symbol {label}]"
+            out.append(mapped)
+        return "".join(out)
 
     def note_reference(self, run: _Element) -> _Element | None:
         for child in run:
@@ -383,7 +417,7 @@ class Reader:
             reference = self.note_reference(run)
             if reference is not None and reference in self.note_numbers:
                 add(self.note_numbers[reference], bold, italic, True, size)
-            text = self.run_text(run)
+            text = self.run_text(run, style_ids)
             if text:
                 add(text, bold, italic, superscript or in_math_superscript(run), size)
         return tidy_spans(out)
@@ -769,8 +803,17 @@ def field_code_text(root: _Element) -> set[_Element]:
 
 def symbol_char(element: _Element) -> str | None:
     """The character a w:sym stands for, or None when its font/code is not in the tables."""
-    font = (attr(element, "font", "") or "").casefold()
-    code = int(attr(element, "char", "0") or "0", HEX_BASE) & SYMBOL_GLYPH_MASK
+    return symbol_font_char(attr(element, "font", "") or "", int(attr(element, "char", "0") or "0", HEX_BASE))
+
+
+def is_symbol_glyph_code(code: int) -> bool:
+    return code <= SYMBOL_GLYPH_MASK or SYMBOL_PRIVATE_USE_START <= code <= SYMBOL_PRIVATE_USE_START + SYMBOL_GLYPH_MASK
+
+
+def symbol_font_char(font: str, code: int) -> str | None:
+    """The Unicode character a symbol-font code point shows, or None when it is not in the tables."""
+    font = font.casefold()
+    code &= SYMBOL_GLYPH_MASK
     if font == "symbol":
         return SYMBOL_FONT_CHARS.get(code) or GREEK_LETTERS.get(chr(code))
     if font.startswith("wingdings"):
