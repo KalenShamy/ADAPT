@@ -8,6 +8,7 @@ from docx.shared import RGBColor
 
 from block_xhtml import xhtml_to_blocks
 from converter.title_page import TITLE_PAGE_UNMAPPED_ID, render_values
+from converter.render.renumber import displayed_numbers, ordered_children, renumber_blocks, renumber_text
 from pdf_to_cpt_docx import Figure, PageMark, Table, Writer, write_block, write_title_page
 
 type JsonObject = dict[str, object]
@@ -17,7 +18,6 @@ MISSING_TEXT = "[NOT EXTRACTED: no content found in the source protocol]"
 NOT_APPLICABLE_TEXT = "Not applicable"
 AI_NOTE = "[AI-drafted from the source protocol. Review required.]"
 MISSING_COLOR = RGBColor(0xC0, 0x00, 0x00)
-NUMBER_PART = re.compile(r"^[\d.]+")
 UNSPLIT_TEXT = "[Not separated in the source protocol; see the section text below]"
 
 # Fixed M11 wording the validator checks; the source's own lead-in sentence is replaced, not repeated
@@ -76,6 +76,7 @@ FIELD_TABLES = [
         ("Reportable Period Start", "reportable_period_start"), ("Reportable Period End", "reportable_period_end"),
         ("Timing for Reporting to Sponsor", "timing_for_reporting"), ("Method for Reporting", "reporting_method"),
         ("Back-up Method for Reporting", "backup_reporting_method")]),
+    ("1.1.1", "summary_rows", [("Objectives", "objective"), ("Estimand Summary", "estimand_summary")]),
     ("12.3", "prior_amendments", [
         ("Amendment Identifier", "amendment_identifier"), ("Sponsor Approval Date", "sponsor_approval_date"),
         ("Approximate Enrollment", "approximate_enrollment"), ("Enrollment Scope", "enrollment_scope")]),
@@ -83,6 +84,7 @@ FIELD_TABLES = [
 ESTIMAND_COLUMNS = ["population", "treatment", "endpoint", "population_level_summary"]
 ESTIMAND_HEADINGS = ["Population", "Treatment", "Endpoint", "Population-Level Summary"]
 OPTIONAL_LABELS = {"Other Committees:"}  # M11 Optional: written only when the source states them
+HEADING_LABELS = {"Population Age:", "Duration:", "Committees:"}  # M11 headings that only group the labels after them
 OVERALL_DESIGN_INTRO = "Key aspects of the trial design are summarised below."
 
 
@@ -94,6 +96,7 @@ class DocxRenderer:
         self.protocol_label = protocol_label
         self.toc_entries: list[tuple[int, str, str]] = []
         self.protocol_number = ""
+        self.shifted_numbers: dict[str, str] = {}
 
     def render(self, protocol: JsonObject, out_path: Path) -> None:
         writer = self.writer
@@ -102,6 +105,7 @@ class DocxRenderer:
         writer.toc()
         writer.page_break()
         sections = protocol["sections"]
+        self.shifted_numbers = displayed_numbers(sections)
         for key in sorted(sections, key=int):
             self.section(sections[key], level=1)
         writer.finish_sections()
@@ -136,6 +140,8 @@ class DocxRenderer:
         landscape = self.landscape_blocks(content)
         self.writer.set_orientation(bool(content) and landscape[id(content[0])])
         self.heading(str(number), str(section["title"]), level)
+        if number == "1.1.1" and section.get("fields", {}).get("summary_rows"):
+            content = []  # the rows table replaces the source's synopsis table
         content = self.fixed_text(number, content, section.get("fields", {}))
         self.status_text(status, content)
         for block in content:
@@ -144,9 +150,8 @@ class DocxRenderer:
             self.criterion(criterion)
         self.field_tables(number, section.get("fields", {}))
         self.objectives(section.get("objectives", []))
-        children = section.get("subsections", {})
-        for key in sorted(children, key=natural_key):
-            self.section(children[key], level + 1)
+        for child in ordered_children(section):
+            self.section(child, level + 1)
         for extra in section.get("additional_subsections", []):
             self.additional(extra, level + 1)
 
@@ -165,7 +170,7 @@ class DocxRenderer:
             self.writer.paragraph(self.writer.styles["field_label"], text=label)
             if filled:
                 self.highlighted(filled)
-            else:
+            elif label not in HEADING_LABELS:
                 self.writer.paragraph(body, text=UNSPLIT_TEXT)
         return content
 
@@ -207,9 +212,9 @@ class DocxRenderer:
     def criterion(self, criterion: JsonObject) -> None:
         """One numbered paragraph; the criterion's further lines (sub-items) follow as bullets."""
         first, *rest = str(criterion["text"]["value"]).split("\n")
-        self.writer.paragraph(self.writer.styles["body"], text=f"{criterion['number']}. {first}")
+        self.writer.paragraph(self.writer.styles["body"], text=self.renumbered(f"{criterion['number']}. {first}"))
         for line in rest:
-            self.writer.paragraph(self.writer.styles["bullet"], text=line)
+            self.writer.paragraph(self.writer.styles["bullet"], text=self.renumbered(line))
 
     def additional(self, node: JsonObject, level: int) -> None:
         self.heading("", str(node["title"]), level)
@@ -220,7 +225,7 @@ class DocxRenderer:
             self.additional(child, level + 1)
 
     def heading(self, number: str, title: str, level: int) -> None:
-        self.toc_entries.append((level, number, title))
+        self.toc_entries.append((level, self.shifted_numbers.get(number, number), title))
         self.writer.numbered_heading(title, level)
 
     def status_text(self, status: str, content: list[JsonObject]) -> None:
@@ -250,6 +255,7 @@ class DocxRenderer:
             self.plain_block(block)
             return
         self.writer.set_orientation(landscape)
+        renumber_blocks(rich_blocks, self.shifted_numbers)
         for rich in rich_blocks:
             write_block(self.writer, rich)
 
@@ -275,11 +281,14 @@ class DocxRenderer:
 
     def plain_block(self, block: JsonObject) -> None:
         if block["type"] == "table":
-            self.writer.simple_table(block["rows"])
+            self.writer.simple_table([[self.renumbered(cell) for cell in row] for row in block["rows"]])
         elif block["type"] == "heading":
-            self.writer.paragraph(self.writer.styles["field_label"], text=block["text"])
+            self.writer.paragraph(self.writer.styles["field_label"], text=self.renumbered(block["text"]))
         else:
-            self.writer.paragraph(self.writer.styles["body"], text=block["text"])
+            self.writer.paragraph(self.writer.styles["body"], text=self.renumbered(block["text"]))
+
+    def renumbered(self, text: str) -> str:
+        return renumber_text(text, self.shifted_numbers)
 
     def ai_block(self, block: JsonObject) -> None:
         self.plain_block(block)
@@ -348,11 +357,6 @@ def is_title_field(item: JsonObject) -> bool:
 
 def is_ai(block: JsonObject) -> bool:
     return block["custody"]["origin"] in ("ai_generated", "ai_transformed")
-
-
-def natural_key(key: str) -> tuple[int, ...]:
-    match = NUMBER_PART.match(key)
-    return tuple(int(part) for part in match.group(0).split(".") if part) if match else ()
 
 
 def render_docx(protocol: JsonObject, layout: dict[str, str], assets_dir: Path,

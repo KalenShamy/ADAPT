@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass, field
 
-from converter.render.docx import LEAD_INS, is_lead_in, is_title_field, natural_key
+from converter.render.docx import LEAD_INS, is_lead_in, is_title_field
+from converter.render.renumber import displayed_numbers, natural_key, renumber_text
 
 type JsonObject = dict[str, object]
 
@@ -17,6 +18,7 @@ class Expectation:
 
 @dataclass
 class Audit:
+    shifted_numbers: dict[str, str] = field(default_factory=dict)
     outline: list[tuple[int, str, str]] = field(default_factory=list)
     blocks: list[Expectation] = field(default_factory=list)
     figures: int = 0
@@ -32,7 +34,7 @@ def table_text(rows: list[list[object]]) -> str:
 
 
 def build_audit(protocol: JsonObject) -> Audit:
-    audit = Audit()
+    audit = Audit(shifted_numbers=displayed_numbers(protocol["sections"]))
     counters: list[int] = []
     for item in protocol.get("unplaced_v10_content", []):
         if not is_title_field(item):
@@ -80,5 +82,6 @@ def add_blocks(audit: Audit, blocks: list[JsonObject], where: str) -> None:
             audit.figures += 1
             continue
         text = table_text(block["rows"]) if block["type"] == "table" else str(block.get("text", ""))
+        text = renumber_text(text, audit.shifted_numbers)
         if squash(text):
             audit.blocks.append(Expectation(block["type"], squash(text), where))
