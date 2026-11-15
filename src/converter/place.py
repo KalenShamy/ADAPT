@@ -87,7 +87,7 @@ class Placer:
 
     def landscape_marks(self, block: object) -> list[PageMark]:
         """A landscape page mark ahead of a block that sat on a landscape page in the source."""
-        page = block.first_page if isinstance(block, Table) else getattr(block, "page", 0)
+        page = getattr(block, "page", 0)
         return [PageMark(True, page)] if self.landscape_pages.get(page) else []
 
     def block(self, block: object, section_source: JsonObject) -> JsonObject:
@@ -229,14 +229,34 @@ def unplaced_title_fields(placer: Placer, others: list[tuple[str | None, str]]) 
     return items
 
 
+def numbered_targets(protocol: JsonObject, result) -> dict[str, str]:
+    """The cross-reference map with each target moved to the nearest section that gets a heading number.
+
+    A node with no section in the template skeleton is written as an unnumbered additional subsection,
+    so a reference to it points at the numbered ancestor that holds it.
+    """
+    heading_number: dict[str, str] = {}
+
+    def visit(nodes: list, enclosing: str | None) -> None:
+        for node in nodes:
+            has_section = node.from_template and find_section(protocol, node.template_number) is not None
+            own = node.number if has_section else enclosing
+            if own and node.number:
+                heading_number[node.number] = own
+            visit(node.children, own)
+
+    visit(result.nodes, None)
+    return {source: heading_number.get(number, number) for source, number in result.number_map.items()}
+
+
 def place_document(document, pdf_path: Path, schema: JsonObject, crosswalk, outline, assets_dir: Path, template_file: str):
     """Return (protocol JSON, layout sidecar dict, restructure report)."""
     result = restructure(document, crosswalk, outline)
-    references = rewrite_cross_references(list(iter_blocks(result)), result.number_map, result.also_sources)
+    protocol = minimal_instance(schema)
+    references = rewrite_cross_references(list(iter_blocks(result)), numbered_targets(protocol, result), result.also_sources)
     result.report.notes.append(f"Cross-references rewritten: {references.rewritten}")
     result.report.notes.extend(f"Cross-reference to review: {entry}" for entry in references.review)
     result.report.notes.extend(f"Cross-reference unresolved: {entry}" for entry in references.unresolved)
-    protocol = minimal_instance(schema)
     protocol["source"] = {
         "path": str(pdf_path), "file_name": pdf_path.name, "sha256": file_sha256(pdf_path),
         "template": SOURCE_TEMPLATE, "extracted_at": now_iso(),
